@@ -10,6 +10,28 @@ replay:
     - 5m
   default_speed: 1.0
   only_closed_candles: true
+  intrabar_policy: m1_exact
+  checkpoint_every_bars: 50
+
+algorithm:
+  version: "1.0.0"
+  pivot:
+    wing: 2
+    equal_extrema: first
+    min_volume_ratio: null
+  level:
+    zone_percent: 0.001
+    breakout: close
+    min_bounce_percent: 0.001
+    max_lifetime_bars: null
+    tick_size: 0.01
+  outcomes:
+    - name: quick_rebound
+      wait_bars: 3
+      min_bounce_percent: 0.001
+    - name: patient_rebound
+      wait_bars: 8
+      min_bounce_percent: 0.001
 
 market:
   exchange: binance

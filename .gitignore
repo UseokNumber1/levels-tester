@@ -10,6 +10,7 @@ dist/
 build/
 *.egg-info/
 .env
+*.db
 
 # Local IDE files
 .idea/
