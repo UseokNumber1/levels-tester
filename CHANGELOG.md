@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.0 (2026-08-26)
+
+### Added
+
+- **Approach detection**: `level.approaching` event emitted when price enters the approach zone before a touch
+- **Auto-pause on touch**: replay stops automatically when an active level is touched
+- **Version display**: version number shown in page title and topbar header
+
+### Changed
+
+- **Level algorithm aligned with MVP_1H scanner**: `wing=6`, `zone_percent=0.008`, `min_bounce_percent=0.045`, `min_touches=2`, `breakout=wick`
+- **Pivot volume filter**: global average volume ratio `min_volume_ratio=0.5` replaces local neighbour average
+- **Pivot time**: `pivot_time` uses `open_time` instead of `close_time` to match chart candle position
+- **Level price**: recalculated as median of cluster pivot prices instead of expanding zone
+- **Level touch detection**: resistance checks `high`, support checks `low` (not broad range overlap)
+- **Level states**: levels transition `CREATED → CONFIRMED → WAITING_TOUCH → TOUCHED → BROKEN`
+- **Chart rendering**: incremental `update()` with `rightOffset`/`barSpacing` instead of `fitContent()`; proper scrolling
+- **Frontend level display**: only confirmed levels shown on chart and in panel; broken/expired removed on reset
+
+### Fixed
+
+- **Pivot marker offset**: high/low markers no longer shifted one candle to the right
+- **Broken levels not removed**: broken levels now cleared from chart and level panel
+- **Reset cleanup**: price lines and markers cleared on reset
+
+### Configuration
+
+- Algorithm defaults in `config/default.yaml` now match scanner production values
+
 ## v0.2.0 (2026-08-25)
 
 ### Added

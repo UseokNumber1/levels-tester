@@ -105,7 +105,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],

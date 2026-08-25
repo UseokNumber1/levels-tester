@@ -126,6 +126,7 @@ class ReplayEngine:
     def reset(self) -> None:
         self._detector = CausalPivotDetector(self.config.pivot)
         self._levels = LevelBook(self.run_id, self.config.level)
+        self._levels.set_candles(list(self._master_candles))
         self._outcomes = OutcomeEvaluator(self.run_id, self.config.outcome_profiles)
         self._pivots: list[Pivot] = []
         self._events: list[LevelEvent] = []

@@ -62,8 +62,9 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> ReplayConfig
             else None,
         ),
         level=LevelConfig(
-            zone_percent=Decimal(str(level.get("zone_percent", "0.001"))),
-            min_bounce_percent=Decimal(str(level.get("min_bounce_percent", "0"))),
+            zone_percent=Decimal(str(level.get("zone_percent", "0.008"))),
+            min_bounce_percent=Decimal(str(level.get("min_bounce_percent", "0.045"))),
+            min_touches=int(level.get("min_touches", 2)),
             breakout=level.get("breakout", "close"),
             max_lifetime_bars=level.get("max_lifetime_bars"),
             tick_size=Decimal(str(level.get("tick_size", "0.01"))),

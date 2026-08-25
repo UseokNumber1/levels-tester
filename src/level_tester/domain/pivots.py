@@ -8,8 +8,8 @@ from level_tester.domain.models import Candle, Pivot, PivotKind
 
 @dataclass(frozen=True, slots=True)
 class PivotDetectorConfig:
-    wing: int = 2
-    min_volume_ratio: Decimal | None = None
+    wing: int = 6
+    min_volume_ratio: Decimal | None = Decimal("0.5")
 
     def __post_init__(self) -> None:
         if self.wing < 1:
@@ -25,6 +25,8 @@ class CausalPivotDetector:
         self.config = config or PivotDetectorConfig()
         self._candles: list[Candle] = []
         self._emitted_indices: set[int] = set()
+        self._avg_volume: Decimal = Decimal("0")
+        self._volume_sum: Decimal = Decimal("0")
 
     @property
     def candles(self) -> tuple[Candle, ...]:
@@ -34,6 +36,8 @@ class CausalPivotDetector:
         if self._candles and candle.open_time <= self._candles[-1].open_time:
             raise ValueError("candles must be supplied in strictly chronological order")
         self._candles.append(candle)
+        self._volume_sum += candle.volume
+        self._avg_volume = self._volume_sum / len(self._candles)
         candidate = len(self._candles) - self.config.wing - 1
         if candidate < self.config.wing or candidate in self._emitted_indices:
             return []
@@ -45,15 +49,11 @@ class CausalPivotDetector:
         center = self._candles[index]
         left = self._candles[index - wing : index]
         right = self._candles[index + 1 : index + wing + 1]
-        if self.config.min_volume_ratio is not None:
-            neighbours = left + right
-            average = sum((bar.volume for bar in neighbours), Decimal("0")) / len(neighbours)
-            if average and center.volume < average * self.config.min_volume_ratio:
+        if self.config.min_volume_ratio is not None and self._avg_volume > 0:
+            if center.volume < self._avg_volume * self.config.min_volume_ratio:
                 return []
 
         result: list[Pivot] = []
-        # Equal highs/lows are rejected on the left and accepted on the right:
-        # this consistently keeps the first occurrence in a flat extreme.
         if center.high > max(bar.high for bar in left) and center.high >= max(
             bar.high for bar in right
         ):
@@ -62,7 +62,7 @@ class CausalPivotDetector:
                     id=f"high-{index}",
                     kind=PivotKind.HIGH,
                     price=center.high,
-                    pivot_time=center.close_time,
+                    pivot_time=center.open_time,
                     confirmed_time=self._candles[index + wing].close_time,
                     source_index=index,
                 )
@@ -75,7 +75,7 @@ class CausalPivotDetector:
                     id=f"low-{index}",
                     kind=PivotKind.LOW,
                     price=center.low,
-                    pivot_time=center.close_time,
+                    pivot_time=center.open_time,
                     confirmed_time=self._candles[index + wing].close_time,
                     source_index=index,
                 )

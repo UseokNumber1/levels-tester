@@ -2,6 +2,9 @@
 setlocal
 cd /d "%~dp0"
 
+rem Enable ANSI/VT100 color output in Windows console
+reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment ^(one-time^)...
     python -m venv .venv
@@ -16,5 +19,5 @@ if errorlevel 1 (
     if errorlevel 1 exit /b %errorlevel%
 )
 
-echo Starting Levels Tester at http://127.0.0.1:8000/
-.venv\Scripts\python.exe -m uvicorn level_tester.api.app:app --host 127.0.0.1 --port 8000
+echo Starting Levels Tester at http://127.0.0.1:8080/
+.venv\Scripts\python.exe -m uvicorn level_tester.api.app:app --host 127.0.0.1 --port 8080

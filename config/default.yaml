@@ -16,13 +16,14 @@ replay:
 algorithm:
   version: "1.0.0"
   pivot:
-    wing: 2
+    wing: 6
     equal_extrema: first
-    min_volume_ratio: null
+    min_volume_ratio: 0.5
   level:
-    zone_percent: 0.001
-    breakout: close
-    min_bounce_percent: 0.001
+    zone_percent: 0.008
+    breakout: wick
+    min_bounce_percent: 0.045
+    min_touches: 2
     max_lifetime_bars: null
     tick_size: 0.01
   outcomes:
