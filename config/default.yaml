@@ -1,0 +1,17 @@
+app:
+  environment: development
+  host: 127.0.0.1
+  port: 8000
+
+replay:
+  primary_timeframe: 1h
+  detail_timeframes:
+    - 1m
+    - 5m
+  default_speed: 1.0
+  only_closed_candles: true
+
+market:
+  exchange: binance
+  market_type: usdt_m_futures
+  quote_asset: USDT
