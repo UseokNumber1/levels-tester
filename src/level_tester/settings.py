@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     app_env: str = Field(default="development", validation_alias="APP_ENV")
     app_host: str = Field(default="127.0.0.1", validation_alias="APP_HOST")
-    app_port: int = Field(default=8000, validation_alias="APP_PORT")
+    app_port: int = Field(default=8080, validation_alias="APP_PORT")
     database_url: str = Field(
         default="sqlite:///./levels_tester.db",
         validation_alias="DATABASE_URL",

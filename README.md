@@ -35,8 +35,8 @@ uvicorn level_tester.api.app:app --reload
 Проверка:
 
 ```text
-http://127.0.0.1:8000/health
-http://127.0.0.1:8000/
+http://127.0.0.1:8080/health
+http://127.0.0.1:8080/
 ```
 
 ## API
@@ -44,7 +44,7 @@ http://127.0.0.1:8000/
 Создание запуска:
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:8000/api/runs `
+curl.exe -X POST http://127.0.0.1:8080/api/runs `
   -H "Content-Type: application/json" `
   -d '{"symbol":"BTCUSDT","display_from":"2026-01-01T00:00:00+00:00","detail_timeframe":"1m"}'
 ```

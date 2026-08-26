@@ -1,0 +1,23 @@
+{
+  "name": "resistance_touch_and_breakout",
+  "master_candles": [
+    {"open_time": "2026-01-01T00:00:00+00:00", "close_time": "2026-01-01T01:00:00+00:00", "open": "9", "high": "10", "low": "8", "close": "9", "volume": "10", "timeframe": "1h"},
+    {"open_time": "2026-01-01T01:00:00+00:00", "close_time": "2026-01-01T02:00:00+00:00", "open": "10", "high": "12", "low": "9", "close": "10", "volume": "10", "timeframe": "1h"},
+    {"open_time": "2026-01-01T02:00:00+00:00", "close_time": "2026-01-01T03:00:00+00:00", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "10", "timeframe": "1h"},
+    {"open_time": "2026-01-01T03:00:00+00:00", "close_time": "2026-01-01T04:00:00+00:00", "open": "11", "high": "11.8", "low": "10.5", "close": "11", "volume": "10", "timeframe": "1h"},
+    {"open_time": "2026-01-01T04:00:00+00:00", "close_time": "2026-01-01T05:00:00+00:00", "open": "11.5", "high": "12", "low": "11", "close": "11.5", "volume": "10", "timeframe": "1h"},
+    {"open_time": "2026-01-01T05:00:00+00:00", "close_time": "2026-01-01T06:00:00+00:00", "open": "12", "high": "13", "low": "11", "close": "12", "volume": "10", "timeframe": "1h"}
+  ],
+  "detail_candles": [
+    {"open_time": "2026-01-01T04:00:00+00:00", "close_time": "2026-01-01T04:01:00+00:00", "open": "11.5", "high": "11.7", "low": "11.4", "close": "11.6", "volume": "1", "timeframe": "1m"},
+    {"open_time": "2026-01-01T04:01:00+00:00", "close_time": "2026-01-01T04:02:00+00:00", "open": "11.6", "high": "12", "low": "11.5", "close": "11.8", "volume": "1", "timeframe": "1m"},
+    {"open_time": "2026-01-01T05:00:00+00:00", "close_time": "2026-01-01T05:01:00+00:00", "open": "12", "high": "13", "low": "11.8", "close": "12.5", "volume": "1", "timeframe": "1m"}
+  ],
+  "expected_events": [
+    [3, "pivot.confirmed"],
+    [3, "level.created"],
+    [4, "level.approaching"],
+    [5, "level.touched"],
+    [6, "level.broken"]
+  ]
+}

@@ -1,16 +1,16 @@
 app:
   environment: development
   host: 127.0.0.1
-  port: 8000
+  port: 8080
 
 replay:
   primary_timeframe: 1h
   detail_timeframes:
     - 1m
     - 5m
-  default_speed: 1.0
+  default_speed: 2.0
   only_closed_candles: true
-  intrabar_policy: m1_exact
+  intrabar_policy: m5_exact
   checkpoint_every_bars: 50
 
 algorithm:

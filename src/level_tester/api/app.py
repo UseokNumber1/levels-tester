@@ -108,7 +108,7 @@ async def lifespan(application: FastAPI):
 app = FastAPI(title="Levels Tester", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Content-Type"],
@@ -283,7 +283,7 @@ async def update_speed(run_id: str, request: SpeedUpdate) -> dict[str, Any]:
 @app.websocket("/api/runs/{run_id}/events")
 async def events(websocket: WebSocket, run_id: str, after_sequence: int = -1) -> None:
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in {"http://127.0.0.1:8000", "http://localhost:8000"}:
+    if origin is not None and origin not in {"http://127.0.0.1:8080", "http://localhost:8080"}:
         await websocket.close(code=4403)
         return
     try:
