@@ -16,8 +16,26 @@ const state = {
   detailActive: false,
   detailPrevMs: null,
   detailAnimTimer: null,
+  detailAnimSeq: 0,
+  detailLevelLines: [],
 };
 const $ = (id) => document.getElementById(id);
+const DETAIL_TF_KEY = 'levels-tester-detail-tf';
+
+$('detail-tf').value = localStorage.getItem(DETAIL_TF_KEY) === '5m' ? '5m' : '1m';
+updateDetailTitle();
+$('detail-tf').onchange = () => {
+  localStorage.setItem(DETAIL_TF_KEY, $('detail-tf').value);
+  updateDetailTitle();
+};
+
+function updateDetailTitle() {
+  $('detail-title').textContent = `Detail ${$('detail-tf').value === '5m' ? 'M5' : 'M1'}`;
+}
+
+function selectedDetailTf() {
+  return $('detail-tf').value;
+}
 
 function isoInput(value) {
   const d = new Date(value);
@@ -157,6 +175,7 @@ function syncChartToCursor(snapshot) {
   }
 
   renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
+  renderDetailLevelLines(snapshot.levels.filter(isConfirmedLevel));
 
   if (state.candleSeries.setMarkers) {
     state.candleSeries.setMarkers(snapshot.pivots.map(pivot => ({
@@ -172,6 +191,47 @@ function syncChartToCursor(snapshot) {
 function clearLevelLines() {
   state.levelLines.forEach(line => state.candleSeries.removePriceLine(line));
   state.levelLines = [];
+}
+
+function clearDetailLevelLines() {
+  if (!state.detailSeries) return;
+  state.detailLevelLines.forEach(line => state.detailSeries.removePriceLine(line));
+  state.detailLevelLines = [];
+}
+
+function renderDetailLevelLines(levels) {
+  clearDetailLevelLines();
+  if (!state.detailSeries || !state.detailActive) return;
+  state.detailLevelLines = levels.flatMap(level => {
+    const isSupport = level.side === 'support';
+    const color = isSupport ? '#2166f3' : '#ee6c4d';
+    return [
+      state.detailSeries.createPriceLine({
+        price: Number(level.zone_low),
+        color,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: false,
+        title: '',
+      }),
+      state.detailSeries.createPriceLine({
+        price: Number(level.price),
+        color,
+        lineWidth: level.state === 'touched' ? 2 : 1,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        title: `${level.side[0].toUpperCase()} ${level.price}`,
+      }),
+      state.detailSeries.createPriceLine({
+        price: Number(level.zone_high),
+        color,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: false,
+        title: '',
+      }),
+    ];
+  });
 }
 
 function renderLevelLines(levels) {
@@ -250,12 +310,13 @@ async function autoPlayStep() {
         snapshot.cursor && event.sequence === snapshot.cursor.sequence
       );
       if (touchedOnCurrentBar) {
-        await syncDetail(snapshot);
+        state.detailEnabled = true;
+        openDetailPanel();
+        $('detail-status').textContent = 'paused on touch — press Step for M1 replay';
         stopAnimation();
         showHint('⏸ Пауза — уровень затронут, нажмите Play или Step для продолжения');
         return;
       }
-      await syncDetail(snapshot);
     }
     if (snapshot.status === 'completed') {
       stopAnimation();
@@ -286,6 +347,7 @@ async function command(name) {
   try {
     if (name === 'play') {
       hideHint();
+      if (state.detailEnabled) clearDetailViewData();
       startAutoPlay();
       return;
     }
@@ -324,7 +386,7 @@ $('create').onclick = async () => {
       body: JSON.stringify({
         symbol: $('symbol').value,
         display_from: dateStr,
-        detail_timeframe: '1m',
+        detail_timeframe: selectedDetailTf(),
       }),
     });
     render(snapshot);
@@ -417,7 +479,9 @@ function openDetailPanel() {
 function resetDetailChart() {
   stopDetailAnimation();
   state.detailActive = false;
+  state.detailEnabled = false;
   state.detailPrevMs = null;
+  clearDetailLevelLines();
   if (state.detailSeries) state.detailSeries.setData([]);
   const container = $('detail-chart');
   container.classList.add('detail-waiting');
@@ -426,10 +490,22 @@ function resetDetailChart() {
 }
 
 function stopDetailAnimation() {
+  state.detailAnimSeq++;
   if (state.detailAnimTimer) {
     clearTimeout(state.detailAnimTimer);
     state.detailAnimTimer = null;
   }
+}
+
+function clearDetailViewData() {
+  stopDetailAnimation();
+  state.detailPrevMs = null;
+  if (state.detailSeries) {
+    clearDetailLevelLines();
+    state.detailSeries.setData([]);
+  }
+  if (state.detailChart) state.detailChart.timeScale().fitContent();
+  $('detail-status').textContent = 'cleared — press Step for M1 replay';
 }
 
 async function syncDetail(snapshot) {
@@ -439,7 +515,8 @@ async function syncDetail(snapshot) {
     event.event_type === 'level.touched' &&
     snapshot.cursor && event.sequence === snapshot.cursor.sequence
   );
-  if (!state.detailActive && !touchedOnCurrentBar) return;
+  if (!state.detailEnabled && !touchedOnCurrentBar) return;
+  state.detailEnabled = true;
   openDetailPanel();
   const startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
   state.detailPrevMs = cursorMs;
@@ -460,6 +537,7 @@ async function animateDetailCandles(candles, startMs, endMs) {
   stopDetailAnimation();
   initDetailChart();
   if (!state.detailSeries) return;
+  const animSeq = ++state.detailAnimSeq;
   const bars = candles
     .filter(c => {
       const t = new Date(c.open_time).getTime();
@@ -470,11 +548,18 @@ async function animateDetailCandles(candles, startMs, endMs) {
       open: Number(c.open), high: Number(c.high),
       low: Number(c.low), close: Number(c.close),
     }));
-  $('detail-status').textContent = `${bars.length} M1 · ${utcFormat(endMs)} UTC`;
+  $('detail-status').textContent = `${bars.length} ${$('detail-tf').value.toUpperCase()} · ${utcFormat(endMs)} UTC`;
   if (!bars.length) return;
-  for (const bar of bars) {
-    if (!state.detailActive) return;
-    state.detailSeries.update(bar);
+  state.detailSeries.setData(bars.slice(0, 1));
+  const timeScale = state.detailChart.timeScale();
+  timeScale.setVisibleLogicalRange({
+    from: -Math.max(2, Math.round(bars.length * 0.05)),
+    to: bars.length,
+  });
+  for (let i = 1; i < bars.length; i++) {
+    if (animSeq !== state.detailAnimSeq || !state.detailActive) return;
+    state.detailSeries.update(bars[i]);
+    timeScale.scrollToRealtime();
     await sleep(Math.max(30, Math.round(1000 / (Number($('speed').value) || 1))));
   }
 }

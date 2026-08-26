@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Levels Tester v0.4.0</title>
+  <title>Levels Tester v0.4.1</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version">v0.4.0</span></h1></div>
+    <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version">v0.4.1</span></h1></div>
     <div class="server-status"><span id="server-dot" class="dot pending"></span><span id="server-status">CHECKING SERVER</span><div id="run-status" class="status">NO RUN</div></div>
   </header>
   <main class="shell">
     <section class="control-panel">
       <label>Symbol<select id="symbol"><option>Loading instruments...</option></select></label>
       <label>Display from<input id="display-from" type="date"></label>
-      <label>Speed<input id="speed" type="number" min="0.1" max="100" step="0.1" value="1"></label>
+      <label>Speed<input id="speed" type="number" min="1" max="100" step="1" value="1"></label>
+      <label>Detail TF<select id="detail-tf"><option value="1m">M1</option><option value="5m">M5</option></select></label>
       <button id="create" class="primary">New replay</button>
       <span class="panel-divider"></span>
       <label>Search<input id="instrument-search" placeholder="BTC, ETH..."></label>
@@ -37,7 +38,7 @@
     </section>
     <section class="grid">
       <article class="card chart-card"><div class="card-head"><h2>H1 market</h2><span id="bar-count">0 bars</span></div><div id="chart"></div></article>
-      <article class="card detail-chart-card"><div class="card-head"><h2>Detail M1</h2><span id="detail-status">waiting for touch</span></div><div id="detail-chart" class="detail-waiting">Chart opens on level touch.</div></article>
+      <article class="card detail-chart-card"><div class="card-head"><h2 id="detail-title">Detail M1</h2><span id="detail-status">waiting for touch</span></div><div id="detail-chart" class="detail-waiting">Chart opens on level touch.</div></article>
       <aside class="card levels-panel"><div class="card-head"><h2>Active levels</h2><span id="level-count">0</span></div><div id="levels" class="level-list empty">Create a replay to inspect levels.</div></aside>
     </section>
   </main>

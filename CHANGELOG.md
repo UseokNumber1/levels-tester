@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.1 (2026-08-26)
+
+### Added
+
+- **Detail timeframe selector**: M1/M5 picker for the detail window; choice persisted in `localStorage`, applied to the next created replay, panel title follows the selection
+- **Levels on the detail chart**: visible active levels drawn as price lines (center + zone edges) on the M1/M5 chart, synced with the H1 view
+- **Play/Step detail behavior**: Play clears the M1/M5 chart and runs H1 until the next pause; Step re-animates minute candles after pause; detail activation persists for the whole run
+- **Speed stepper**: speed input now increments by 1 (was 0.1)
+
+### Fixed
+
+- **Detail chart zoom**: animation no longer calls `fitContent()` on a single candle (which stretched 1–2 candles across the whole panel); the visible range is preset to the full hour and `scrollToRealtime()` keeps the current price in view
+- **Animation cancellation**: pressing Play during M1/M5 animation no longer leaves a background loop drawing candles; animation generations are cancelled via a sequence counter
+
 ## v0.4.0 (2026-08-26)
 
 ### Added
