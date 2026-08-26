@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.3 (2026-08-26)
+
+### Changed
+
+- **Lightweight Charts v5**: CDN pinned to `lightweight-charts@5` (5.2.1); series created via `chart.addSeries(CandlestickSeries, ...)`, pivot markers moved to `createSeriesMarkers()` primitive, `ResizeObserver` replaced by `autoSize: true`
+- **Right-edge anchoring**: H1 and detail charts use native `timeScale.scrollToPosition(5, false)` — zoom is preserved, the newest candle appears at the right edge while older bars shift left (no manual `setVisibleLogicalRange`, no compression)
+- **Detail animation**: each new M1/M5 candle is drawn individually per Step via accumulated `setData()` (`state.detailBars`); animation state resets cleanly on Reset and Play
+- **Step flow**: detail sync runs on every Step including the warm-up phase; the obsolete `beforeDisplay` gate was removed from the step handler
+
+### Fixed
+
+- **Price scale after symbol switch**: price autoscale is re-enabled per series via `priceScale().setAutoScale(true)` (correct v5 API), so switching BTC → ZEC rescales instead of keeping BTC-level prices off-screen
+- **Single-candle rendering**: removed calls to APIs absent from the published 5.2.1 build (`scrollToRealtime`, `priceScale().fit()`) and the invalid `autoScroll` chart option that aborted drawing after the first candle
+- **H1 initial view**: first load paints all candles visible at the current replay cursor and anchors them to the right edge
+
 ## v0.4.2 (2026-08-26)
 
 ### Added

@@ -19,9 +19,32 @@ const state = {
   detailDrawnTime: undefined,
   detailAnimSeq: 0,
   detailCount: 0,
+  detailBars: [],
   detailLevelLines: [],
+  pivotMarkers: null,
 };
 const $ = (id) => document.getElementById(id);
+const RIGHT_OFFSET_BARS = 5;
+
+function scrollChartToRight(chart) {
+  if (!chart) return;
+  const timeScale = chart.timeScale();
+  if (typeof timeScale.scrollToPosition === 'function') {
+    // Preserve the current zoom and keep the newest bar at the right edge.
+    timeScale.scrollToPosition(RIGHT_OFFSET_BARS, false);
+  }
+}
+
+function enablePriceAutoScale(series) {
+  if (!series) return;
+  const priceScale = series.priceScale();
+  if (typeof priceScale.setAutoScale === 'function') {
+    priceScale.setAutoScale(true);
+  } else {
+    priceScale.applyOptions({ autoScale: true });
+  }
+}
+
 const DETAIL_TF_KEY = 'levels-tester-detail-tf';
 
 $('detail-tf').value = localStorage.getItem(DETAIL_TF_KEY) === '5m' ? '5m' : '1m';
@@ -180,7 +203,7 @@ function syncChartToCursor(snapshot) {
     }
     state.drawnTime = undefined;
     clearLevelLines();
-    if (state.candleSeries.setMarkers) state.candleSeries.setMarkers([]);
+    setPivotMarkers([]);
     return;
   }
 
@@ -194,35 +217,42 @@ function syncChartToCursor(snapshot) {
   }));
 
   const lastTime = bars.length > 0 ? bars[bars.length - 1].time : null;
+  const initialLoad = state.drawnTime === undefined || lastTime === null;
 
-  if (state.drawnTime === undefined || lastTime === null) {
+  if (initialLoad) {
+    // Initial load (or after Reset): paint all visible candles at once.
+    // Load all bars visible at the current replay cursor.
     state.candleSeries.setData(bars);
-    state.chart.timeScale().scrollToPosition(5, false);
+    state.drawnTime = lastTime;
   } else {
+    // Incremental step: add newer bars that come after what we already have.
     for (const bar of bars) {
       if (bar.time > state.drawnTime) {
         state.candleSeries.update(bar);
       }
     }
+    // Remember the newest bar time for the next step.
+    if (bars.length > 0) {
+      state.drawnTime = bars[bars.length - 1].time;
+    }
   }
 
+  // Re-enable autoscaling after a symbol switch, e.g. BTC -> ZEC.
+  enablePriceAutoScale(state.candleSeries);
+  scrollChartToRight(state.chart);
+
   state.chartHasData = bars.length > 0;
-  if (lastTime !== null) {
-    state.drawnTime = lastTime;
-  }
 
   renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
   renderDetailLevelLines(snapshot.levels.filter(isConfirmedLevel));
 
-  if (state.candleSeries.setMarkers) {
-    state.candleSeries.setMarkers(snapshot.pivots.map(pivot => ({
-      time: Math.floor(new Date(pivot.pivot_time).getTime() / 1000),
-      position: pivot.kind === 'high' ? 'aboveBar' : 'belowBar',
-      color: pivot.kind === 'high' ? '#ee6c4d' : '#2166f3',
-      shape: pivot.kind === 'high' ? 'arrowDown' : 'arrowUp',
-      text: pivot.kind,
-    })));
-  }
+  setPivotMarkers(snapshot.pivots.map(pivot => ({
+    time: Math.floor(new Date(pivot.pivot_time).getTime() / 1000),
+    position: pivot.kind === 'high' ? 'aboveBar' : 'belowBar',
+    color: pivot.kind === 'high' ? '#ee6c4d' : '#2166f3',
+    shape: pivot.kind === 'high' ? 'arrowDown' : 'arrowUp',
+    text: pivot.kind,
+  })));
 }
 
 function clearLevelLines() {
@@ -408,10 +438,11 @@ async function command(name) {
       }
     }
     const snapshot = await request(`/api/runs/${state.runId}/${name}`, { method: 'POST' });
-    const beforeDisplay = snapshot.cursor && state.displayFromMs
-      && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
     render(snapshot, name === 'step');
-    if (name === 'step' && snapshot.cursor && !beforeDisplay) {
+    if (name === 'step' && snapshot.cursor) {
+      // Detail data is available from the very first step: the snapshot
+      // exposes detail candles for the whole calculation window (warm-up
+      // included), so there is no reason to gate it on display_from.
       await syncDetail(snapshot);
     }
     drawH1Chart(snapshot);
@@ -475,21 +506,24 @@ function initChart() {
   if (state.chart) return;
   if (!window.LightweightCharts || !$('chart')) return;
   state.chart = LightweightCharts.createChart($('chart'), {
+    autoSize: true,
     layout: { background: { color: '#fffdf8' }, textColor: '#71808a' },
     grid: { vertLines: { color: '#eeeae1' }, horzLines: { color: '#eeeae1' } },
     timeScale: { timeVisible: true, rightOffset: 5, barSpacing: 6 },
   });
-  state.candleSeries = state.chart.addCandlestickSeries({
+  state.candleSeries = state.chart.addSeries(LightweightCharts.CandlestickSeries, {
     upColor: '#198754', downColor: '#ee6c4d',
     borderVisible: false,
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
   });
-  if (window.ResizeObserver) {
-    const resizeObserver = new ResizeObserver(() => {
-      state.chart.resize($('chart').clientWidth, $('chart').clientHeight);
-    });
-    resizeObserver.observe($('chart'));
+}
+
+function setPivotMarkers(markers) {
+  if (!state.candleSeries) return;
+  if (!state.pivotMarkers) {
+    state.pivotMarkers = LightweightCharts.createSeriesMarkers(state.candleSeries, []);
   }
+  state.pivotMarkers.setMarkers(markers);
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -499,22 +533,16 @@ function initDetailChart() {
   const container = $('detail-chart');
   if (!window.LightweightCharts || !container) return;
   state.detailChart = LightweightCharts.createChart(container, {
+    autoSize: true,
     layout: { background: { color: '#fffdf8' }, textColor: '#71808a' },
     grid: { vertLines: { color: '#eeeae1' }, horzLines: { color: '#eeeae1' } },
     timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 5, barSpacing: 6 },
-    autoScroll: true,
   });
-  state.detailSeries = state.detailChart.addCandlestickSeries({
+  state.detailSeries = state.detailChart.addSeries(LightweightCharts.CandlestickSeries, {
     upColor: '#198754', downColor: '#ee6c4d',
     borderVisible: false,
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
   });
-  if (window.ResizeObserver) {
-    const resizeObserver = new ResizeObserver(() => {
-      state.detailChart.resize(container.clientWidth, container.clientHeight);
-    });
-    resizeObserver.observe(container);
-  }
 }
 
 function openDetailPanel() {
@@ -534,6 +562,7 @@ function resetDetailChart() {
   state.detailPrevMs = null;
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
+  state.detailBars = [];
   clearDetailLevelLines();
   if (state.detailSeries) state.detailSeries.setData([]);
   const container = $('detail-chart');
@@ -551,6 +580,7 @@ function clearDetailViewData() {
   state.detailPrevMs = null;
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
+  state.detailBars = [];
   if (state.detailSeries) {
     clearDetailLevelLines();
     state.detailSeries.setData([]);
@@ -602,24 +632,29 @@ async function animateDetailCandles(candles, startMs, endMs) {
   const newBars = bars.filter(bar => lastTime === undefined || bar.time > lastTime);
   $('detail-status').textContent = `${state.detailCount}/${state.detailCount + newBars.length} ${detailTf} · ${utcFormat(endMs)} UTC`;
   if (!newBars.length) return;
-  // Re-anchor the viewport to the realtime edge once per hour batch so newly
-  // appended candles are always on screen, without touching the drawn data.
-  state.detailChart.timeScale().resetTimeScale();
   const delay = Math.max(30, Math.round(1000 / (Number($('speed').value) || 1)));
+  const initialLoad = state.detailDrawnTime === undefined;
+  if (initialLoad) state.detailBars = [];
+
+  // Draw every new detail candle separately, including on subsequent Step
+  // presses. setData() is used with the accumulated data because it is
+  // deterministic in the standalone v5 build; native scrolling keeps zoom.
   for (let i = 0; i < newBars.length; i++) {
     if (animSeq !== state.detailAnimSeq || !state.detailActive) return;
     const bar = newBars[i];
-    if (lastTime !== undefined && bar.time <= lastTime) continue;
+    const nextBars = [...state.detailBars, bar];
     try {
-      state.detailSeries.update(bar);
+      state.detailSeries.setData(nextBars);
     } catch (error) {
-      console.error('detail update failed:', bar, error);
+      console.error('detail setData failed:', bar, error);
       $('detail-status').textContent = `draw error at ${utcFormat(bar.time * 1000)} UTC`;
       return;
     }
-    lastTime = bar.time;
+    state.detailBars = nextBars;
     state.detailDrawnTime = bar.time;
     state.detailCount += 1;
+    enablePriceAutoScale(state.detailSeries);
+    scrollChartToRight(state.detailChart);
     $('detail-status').textContent = `${state.detailCount} ${detailTf} · ${utcFormat(endMs)} UTC`;
     if (i < newBars.length - 1) {
       await sleep(delay);
