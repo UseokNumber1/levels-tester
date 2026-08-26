@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.0 (2026-08-26)
+
+### Added
+
+- **Split chart view**: screen divided into 3/4 H1 chart and 1/4 detail M1/M5 chart, synchronized in parallel
+- **Detail chart activation**: M1/M5 panel opens on level touch and replays minute candles one-by-one at the configured speed
+- **Replay progress indicator**: progress bar with `sequence / total (%)` readout in the toolbar; snapshot now exposes `total_candles` (full replay size including warm-up window)
+- **Situative status hints**: toolbar message on pause ("press Play/Step to continue") and finish; appears at the event moment and clears on next command
+- **Warm-up fast-forward**: replay steps before `display_from` run without delay so playback starts at the first visible candle
+
+### Changed
+
+- **Layout**: full-screen width layout; control fields (symbol, display from, speed, search, min volume, refresh) merged into a single row
+- **Removed panels**: Event journal and Detail timeframe cards removed from the UI; detail timeframe fixed to `1m`
+- **Cursor timezone**: cursor readout now displays UTC matching the chart time scale
+
+### Fixed
+
+- **Null reference errors**: removed JS references to deleted UI elements (`detail-timeframe`, `detail-count`, `events`, `detail`) that crashed "New replay"
+
 ## v0.3.1 (2026-08-26)
 
 ### Added

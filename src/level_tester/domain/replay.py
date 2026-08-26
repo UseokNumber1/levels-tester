@@ -359,6 +359,7 @@ class ReplayEngine:
                 "run_id": self.run_id,
                 "status": self._status,
                 "cursor": self._cursor,
+                "total_candles": len(self._source_candles),
                 "pivots": self._pivots,
                 "levels": self._levels.levels,
                 "outcomes": self._outcomes.outcomes,

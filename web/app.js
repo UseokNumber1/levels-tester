@@ -2,7 +2,6 @@ const state = {
   runId: null,
   chart: null,
   candleSeries: null,
-  detailSequence: null,
   allCandles: [],
   animTimer: null,
   animRunning: false,
@@ -10,6 +9,13 @@ const state = {
   drawnTime: undefined,
   chartHasData: false,
   levelLines: [],
+  totalBars: 0,
+  displayFromMs: null,
+  detailChart: null,
+  detailSeries: null,
+  detailActive: false,
+  detailPrevMs: null,
+  detailAnimTimer: null,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -29,6 +35,12 @@ function formatVolume(vol) {
 
 function isConfirmedLevel(level) {
   return !['created', 'broken', 'expired'].includes(level.state);
+}
+
+function utcFormat(value) {
+  const d = new Date(value);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 async function checkServer() {
@@ -70,10 +82,14 @@ function render(snapshot) {
   }
 
   $('cursor').textContent = snapshot.cursor
-    ? new Date(snapshot.cursor.bar_time).toLocaleString()
+    ? `${utcFormat(snapshot.cursor.bar_time)} UTC`
     : 'not started';
   $('bar-count').textContent = `${snapshot.master_candles.length} bars`;
-  $('detail-count').textContent = `${snapshot.detail_candles.length} candles`;
+  if (snapshot.total_candles) state.totalBars = snapshot.total_candles;
+  const sequence = snapshot.cursor ? snapshot.cursor.sequence : 0;
+  const percent = state.totalBars ? Math.min(100, Math.round((sequence / state.totalBars) * 100)) : 0;
+  $('replay-fill').style.width = `${percent}%`;
+  $('replay-text').textContent = `${sequence} / ${state.totalBars} (${percent}%)`;
   const confirmedLevels = snapshot.levels.filter(isConfirmedLevel);
   $('level-count').textContent = confirmedLevels.length;
 
@@ -84,12 +100,6 @@ function render(snapshot) {
     <div class="level-meta">${level.state} · ${level.touch_count} touches · zone ${level.zone_low}–${level.zone_high}</div></div>`).join('')
     : 'No levels confirmed yet.';
 
-  $('events').classList.toggle('empty', !snapshot.events.length);
-  $('events').innerHTML = snapshot.events.length
-    ? snapshot.events.slice().reverse().map(event => `
-    <div class="event"><span class="event-time">${new Date(event.event_time).toLocaleString()}</span><span class="event-type">${event.event_type}</span><span>${event.reason}</span></div>`).join('')
-    : 'Events will appear after Step.';
-
   if (!isLoading && snapshot.master_candles.length > 0) {
     state.allCandles = snapshot.master_candles;
     syncChartToCursor(snapshot);
@@ -98,8 +108,6 @@ function render(snapshot) {
   if (wasLoading && !isLoading && snapshot.status === 'ready') {
     startAutoPlay();
   }
-
-  loadDetail(snapshot);
 }
 
 function syncChartToCursor(snapshot) {
@@ -217,26 +225,49 @@ function stopAnimation() {
   }
 }
 
+function showHint(text, isFinish = false) {
+  const hint = $('replay-hint');
+  hint.textContent = text;
+  hint.classList.toggle('finish', isFinish);
+}
+
+function hideHint() {
+  const hint = $('replay-hint');
+  hint.textContent = '';
+  hint.classList.remove('finish');
+}
+
 async function autoPlayStep() {
   if (!state.animRunning || !state.runId) return;
   try {
     const snapshot = await request(`/api/runs/${state.runId}/step`, { method: 'POST' });
     render(snapshot);
-    const touchedOnCurrentBar = snapshot.events.some(event =>
-      event.event_type === 'level.touched' &&
-      snapshot.cursor && event.sequence === snapshot.cursor.sequence
-    );
-    if (touchedOnCurrentBar) {
+    const beforeDisplay = snapshot.cursor && state.displayFromMs
+      && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
+    if (!beforeDisplay) {
+      const touchedOnCurrentBar = snapshot.events.some(event =>
+        event.event_type === 'level.touched' &&
+        snapshot.cursor && event.sequence === snapshot.cursor.sequence
+      );
+      if (touchedOnCurrentBar) {
+        await syncDetail(snapshot);
+        stopAnimation();
+        showHint('⏸ Пауза — уровень затронут, нажмите Play или Step для продолжения');
+        return;
+      }
+      await syncDetail(snapshot);
+    }
+    if (snapshot.status === 'completed') {
       stopAnimation();
+      showHint('✔ Финиш — реплей достиг последней свечи', true);
       return;
     }
-    if (snapshot.status === 'completed' || snapshot.status === 'failed' || snapshot.status === 'cancelled') {
+    if (snapshot.status === 'failed' || snapshot.status === 'cancelled') {
       stopAnimation();
       return;
     }
     if (!state.animRunning) return;
-    const speed = Number($('speed').value) || 1;
-    const delay = Math.max(50, Math.round(1000 / speed));
+    const delay = beforeDisplay ? 0 : Math.max(50, Math.round(1000 / (Number($('speed').value) || 1)));
     state.animTimer = setTimeout(autoPlayStep, delay);
   } catch (error) {
     stopAnimation();
@@ -254,14 +285,25 @@ async function command(name) {
   if (!state.runId) return;
   try {
     if (name === 'play') {
+      hideHint();
       startAutoPlay();
       return;
     }
-    if (name === 'pause' || name === 'step' || name === 'reset' || name === 'cancel') {
+    if (name === 'pause') {
       stopAnimation();
+      showHint('⏸ Пауза — нажмите Play или Step для продолжения');
+    } else {
+      hideHint();
+      if (name === 'step' || name === 'reset' || name === 'cancel') {
+        stopAnimation();
+      }
     }
     const snapshot = await request(`/api/runs/${state.runId}/${name}`, { method: 'POST' });
     render(snapshot);
+    if (name === 'step' && snapshot.cursor) {
+      await syncDetail(snapshot);
+    }
+    if (name === 'reset') resetDetailChart();
   } catch (error) { alert(error.message); }
 }
 
@@ -270,14 +312,19 @@ $('create').onclick = async () => {
   state.lastStatus = null;
   state.drawnTime = undefined;
   state.chartHasData = false;
+  state.totalBars = 0;
+  state.displayFromMs = null;
+  resetDetailChart();
+  hideHint();
   try {
     const dateStr = $('display-from').value + 'T00:00:00Z';
+    state.displayFromMs = Date.parse(dateStr);
     const snapshot = await request('/api/runs', {
       method: 'POST',
       body: JSON.stringify({
         symbol: $('symbol').value,
         display_from: dateStr,
-        detail_timeframe: $('detail-timeframe').value,
+        detail_timeframe: '1m',
       }),
     });
     render(snapshot);
@@ -333,19 +380,103 @@ function initChart() {
   }
 }
 
-async function loadDetail(snapshot) {
-  if (!snapshot.cursor || state.detailSequence === snapshot.cursor.sequence) return;
-  state.detailSequence = snapshot.cursor.sequence;
-  const end = new Date(snapshot.cursor.bar_time);
-  const start = new Date(end.getTime() - 60 * 60 * 1000);
-  $('detail').textContent = 'Loading detail candles...';
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function initDetailChart() {
+  if (state.detailChart) return;
+  const container = $('detail-chart');
+  if (!window.LightweightCharts || !container) return;
+  state.detailChart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#fffdf8' }, textColor: '#71808a' },
+    grid: { vertLines: { color: '#eeeae1' }, horzLines: { color: '#eeeae1' } },
+    timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 2 },
+  });
+  state.detailSeries = state.detailChart.addCandlestickSeries({
+    upColor: '#198754', downColor: '#ee6c4d',
+    borderVisible: false,
+    wickUpColor: '#198754', wickDownColor: '#ee6c4d',
+  });
+  if (window.ResizeObserver) {
+    const resizeObserver = new ResizeObserver(() => {
+      state.detailChart.resize(container.clientWidth, container.clientHeight);
+    });
+    resizeObserver.observe(container);
+  }
+}
+
+function openDetailPanel() {
+  if (state.detailActive) return;
+  state.detailActive = true;
+  const container = $('detail-chart');
+  container.classList.remove('detail-waiting');
+  container.textContent = '';
+  initDetailChart();
+  $('detail-status').textContent = 'synced with H1';
+}
+
+function resetDetailChart() {
+  stopDetailAnimation();
+  state.detailActive = false;
+  state.detailPrevMs = null;
+  if (state.detailSeries) state.detailSeries.setData([]);
+  const container = $('detail-chart');
+  container.classList.add('detail-waiting');
+  container.textContent = 'Chart opens on level touch.';
+  $('detail-status').textContent = 'waiting for touch';
+}
+
+function stopDetailAnimation() {
+  if (state.detailAnimTimer) {
+    clearTimeout(state.detailAnimTimer);
+    state.detailAnimTimer = null;
+  }
+}
+
+async function syncDetail(snapshot) {
+  if (!snapshot.cursor) return;
+  const cursorMs = new Date(snapshot.cursor.bar_time).getTime();
+  const touchedOnCurrentBar = snapshot.events.some(event =>
+    event.event_type === 'level.touched' &&
+    snapshot.cursor && event.sequence === snapshot.cursor.sequence
+  );
+  if (!state.detailActive && !touchedOnCurrentBar) return;
+  openDetailPanel();
+  const startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
+  state.detailPrevMs = cursorMs;
+  if (cursorMs <= startMs) return;
   try {
-    const detail = await request(`/api/runs/${snapshot.run_id}/detail?start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`);
-    $('detail-count').textContent = `${detail.detail_candles.length} candles`;
-    $('detail').innerHTML = detail.detail_candles.length
-      ? detail.detail_candles.slice(-8).map(candle => `<div class="event"><span class="event-time">${new Date(candle.open_time).toLocaleTimeString()}</span><span>O ${candle.open} · H ${candle.high} · L ${candle.low} · C ${candle.close}</span></div>`).join('')
-      : 'No detail candles in this range.';
-  } catch (error) { $('detail').textContent = error.message; }
+    const params = new URLSearchParams({
+      start: new Date(startMs).toISOString(),
+      end: new Date(cursorMs).toISOString(),
+    });
+    const data = await request(`/api/runs/${state.runId}/detail?${params}`);
+    await animateDetailCandles(data.detail_candles || [], startMs, cursorMs);
+  } catch (_) {
+    $('detail-status').textContent = 'detail unavailable';
+  }
+}
+
+async function animateDetailCandles(candles, startMs, endMs) {
+  stopDetailAnimation();
+  initDetailChart();
+  if (!state.detailSeries) return;
+  const bars = candles
+    .filter(c => {
+      const t = new Date(c.open_time).getTime();
+      return t > startMs && t <= endMs;
+    })
+    .map(c => ({
+      time: Math.floor(new Date(c.open_time).getTime() / 1000),
+      open: Number(c.open), high: Number(c.high),
+      low: Number(c.low), close: Number(c.close),
+    }));
+  $('detail-status').textContent = `${bars.length} M1 · ${utcFormat(endMs)} UTC`;
+  if (!bars.length) return;
+  for (const bar of bars) {
+    if (!state.detailActive) return;
+    state.detailSeries.update(bar);
+    await sleep(Math.max(30, Math.round(1000 / (Number($('speed').value) || 1))));
+  }
 }
 
 checkServer();
