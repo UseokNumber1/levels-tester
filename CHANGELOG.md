@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.4.2 (2026-08-26)
+
+### Added
+
+- **Config endpoint**: `GET /api/config` exposes replay defaults (`default_speed`, `detail_timeframes`, `default_detail_timeframe`) to the frontend
+- **Config-driven page defaults**: Speed field and detail TF options are populated from `config/default.yaml` on page open; saved TF choice keeps priority over the default
+- **Market configuration**: `market.*` from YAML is now applied — `market_type` selects the Binance endpoint family (USDT-M `fapi` / COIN-M `dapi`, env override still wins), `quote_asset` drives instrument filtering and seeded instrument rows
+
+### Changed
+
+- **Step order**: detail M1/M5 candles animate first, the H1 candle is drawn after the animation completes
+- **Continuous detail chart**: per-tick `fitContent()` removed; candles append via `update()`, previous segments continue across Steps, viewport re-anchored once per hour via `resetTimeScale()` with `autoScroll`
+- **Pause condition**: auto-pause on touch now triggers only when the H1 close remains inside the level zone; a touch followed by an exit no longer stops playback
+- **Detail data window**: snapshot filter uses `calculation_from`, so M1/M5 data is available during the warm-up phase before `display_from`
+- **Run speed**: new runs start with `replay.default_speed` instead of hardcoded 1.0
+
+### Fixed
+
+- **Animation aborts**: replaced unavailable `timeScale.scrollToRealtime()` (LightweightCharts 4.2.3) that crashed the loop after the first candle; animation generations cancel cleanly, draw errors surface in the detail status instead of being swallowed
+
+### Configuration
+
+- `replay.default_speed` raised to 10.0
+
 ## v0.4.1 (2026-08-26)
 
 ### Added

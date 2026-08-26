@@ -53,6 +53,7 @@ class RunService:
             effective_to=window.effective_to,
             window=window,
             detail_timeframe=detail_timeframe,
+            speed=self.default_config.default_speed if self.default_config else 1.0,
         )
         with self._lock:
             self._runs[run.id] = run

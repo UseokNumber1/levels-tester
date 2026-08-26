@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -72,9 +73,20 @@ class SpeedUpdate(BaseModel):
 settings = get_settings()
 config_path = Path(__file__).resolve().parents[3] / "config" / "default.yaml"
 default_config = load_replay_config(config_path)
+
+# The market section of default.yaml selects the endpoint family; an explicit
+# BINANCE_FUTURES_BASE_URL environment override always wins.
+MARKET_BASE_URLS = {
+    "usdt_m_futures": "https://fapi.binance.com",
+    "coin_m_futures": "https://dapi.binance.com",
+}
+binance_base_url = os.environ.get(
+    "BINANCE_FUTURES_BASE_URL",
+    MARKET_BASE_URLS.get(default_config.market.market_type, settings.binance_futures_base_url),
+)
 service = RunService(default_config)
 session_factory = create_session_factory(settings.database_url)
-binance_client = BinanceFuturesClient(settings.binance_futures_base_url)
+binance_client = BinanceFuturesClient(binance_base_url)
 instrument_repository = InstrumentRepository()
 instrument_service = InstrumentService(binance_client, instrument_repository)
 ingestion_service = DataIngestionService(binance_client)
@@ -109,7 +121,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.4.1", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version="0.4.2", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
@@ -140,6 +152,17 @@ async def server_status() -> dict[str, str]:
     }
 
 
+@app.get("/api/config")
+async def replay_config() -> dict[str, Any]:
+    return {
+        "replay": {
+            "default_speed": default_config.default_speed,
+            "detail_timeframes": list(default_config.detail_timeframes),
+            "default_detail_timeframe": default_config.detail_timeframe,
+        }
+    }
+
+
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -160,7 +183,9 @@ async def list_instruments(
     search: str = "",
     min_volume: Decimal | None = Query(default=None, ge=0),
     max_volume: Decimal | None = Query(default=None, ge=0),
-    quote_asset: str = Query(default="USDT", min_length=2, max_length=12),
+    quote_asset: str = Query(
+        default=default_config.market.quote_asset, min_length=2, max_length=12
+    ),
     status: str = Query(default="TRADING", min_length=1, max_length=20),
     limit: int = Query(default=100, ge=1, le=500),
     refresh: bool = False,
@@ -317,10 +342,10 @@ def _load_run(run_id: str, seed: list[Candle] | None) -> None:
             if instrument is None and seed is not None:
                 instrument = InstrumentRow(
                     symbol=run.symbol,
-                    exchange="binance",
-                    market_type="usdt_m_futures",
-                    quote_asset="USDT",
-                    base_asset=run.symbol.removesuffix("USDT"),
+                    exchange=default_config.market.exchange,
+                    market_type=default_config.market.market_type,
+                    quote_asset=default_config.market.quote_asset,
+                    base_asset=run.symbol.removesuffix(default_config.market.quote_asset),
                     status="TRADING",
                 )
                 session.add(instrument)

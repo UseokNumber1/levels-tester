@@ -352,7 +352,7 @@ class ReplayEngine:
             for candle in self._detail_candles
             if cursor_time is not None
             and candle.close_time <= cursor_time
-            and candle.open_time >= self.window.display_from
+            and candle.open_time >= self.window.calculation_from
         ]
         return as_json(
             {

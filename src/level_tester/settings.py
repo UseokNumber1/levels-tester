@@ -6,7 +6,7 @@ import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from level_tester.domain.configuration import StrategyConfig
+from level_tester.domain.configuration import MarketConfig, StrategyConfig
 from level_tester.domain.confirmation import ConfirmationConfig
 from level_tester.domain.evaluation import OutcomeProfile
 from level_tester.domain.execution import ExecutionConfig
@@ -45,10 +45,13 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> StrategyConf
     """Load non-secret algorithm parameters; secrets never come from YAML."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     algorithm = raw.get("algorithm", {})
+    replay = raw.get("replay", {})
     pivot = algorithm.get("pivot", {})
     level = algorithm.get("level", {})
     confirmation = algorithm.get("confirmation", {})
     execution = algorithm.get("execution", {})
+    market = raw.get("market", {})
+    detail_timeframes = tuple(replay.get("detail_timeframes", ["1m", "5m"]))
     profiles = tuple(
         OutcomeProfile(
             item["name"],
@@ -72,7 +75,9 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> StrategyConf
             max_lifetime_bars=level.get("max_lifetime_bars"),
             tick_size=Decimal(str(level.get("tick_size", "0.01"))),
         ),
-        detail_timeframe=raw.get("replay", {}).get("detail_timeframes", ["1m"])[0],
+        default_speed=float(replay.get("default_speed", 1.0)),
+        detail_timeframes=detail_timeframes,
+        detail_timeframe=detail_timeframes[0],
         outcome_profiles=profiles,
         confirmation=ConfirmationConfig(
             timeframe=confirmation.get("timeframe", "5m"),
@@ -85,5 +90,10 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> StrategyConf
             risk_reward=Decimal(str(execution.get("risk_reward", "2"))),
             fee_percent=Decimal(str(execution.get("fee_percent", "0"))),
             slippage_percent=Decimal(str(execution.get("slippage_percent", "0"))),
+        ),
+        market=MarketConfig(
+            exchange=market.get("exchange", "binance"),
+            market_type=market.get("market_type", "usdt_m_futures"),
+            quote_asset=market.get("quote_asset", "USDT"),
         ),
     )

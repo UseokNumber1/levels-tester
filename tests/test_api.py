@@ -46,3 +46,14 @@ def test_naive_api_timestamp_is_rejected() -> None:
         "/api/runs", json={"symbol": "BTCUSDT", "display_from": "2026-01-01T00:00:00"}
     )
     assert response.status_code == 422
+
+
+def test_replay_config_is_available_to_frontend() -> None:
+    response = TestClient(app).get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json()["replay"] == {
+        "default_speed": 10.0,
+        "detail_timeframes": ["1m", "5m"],
+        "default_detail_timeframe": "1m",
+    }

@@ -14,9 +14,11 @@ const state = {
   detailChart: null,
   detailSeries: null,
   detailActive: false,
+  detailEnabled: false,
   detailPrevMs: null,
-  detailAnimTimer: null,
+  detailDrawnTime: undefined,
   detailAnimSeq: 0,
+  detailCount: 0,
   detailLevelLines: [],
 };
 const $ = (id) => document.getElementById(id);
@@ -35,6 +37,32 @@ function updateDetailTitle() {
 
 function selectedDetailTf() {
   return $('detail-tf').value;
+}
+
+async function loadReplayConfig() {
+  try {
+    const config = await request('/api/config');
+    const replay = config.replay || {};
+    const defaultSpeed = Number(replay.default_speed);
+    if (Number.isFinite(defaultSpeed) && defaultSpeed > 0) {
+      $('speed').value = String(defaultSpeed);
+    }
+    const timeframes = Array.isArray(replay.detail_timeframes)
+      ? replay.detail_timeframes.filter(item => ['1m', '5m'].includes(item))
+      : [];
+    if (timeframes.length) {
+      $('detail-tf').innerHTML = timeframes
+        .map(timeframe => `<option value="${timeframe}">${timeframe.toUpperCase()}</option>`)
+        .join('');
+      const saved = localStorage.getItem(DETAIL_TF_KEY);
+      $('detail-tf').value = timeframes.includes(saved)
+        ? saved
+        : (replay.default_detail_timeframe || timeframes[0]);
+      updateDetailTitle();
+    }
+  } catch (_) {
+    // Keep the safe HTML defaults if the config endpoint is unavailable.
+  }
 }
 
 function isoInput(value) {
@@ -82,8 +110,11 @@ async function loadInstruments(force = false) {
   } catch (error) { $('instrument-info').textContent = error.message; }
 }
 
-function render(snapshot) {
+function render(snapshot, deferChart = false) {
   state.runId = snapshot.run_id;
+  if (Number.isFinite(Number(snapshot.speed))) {
+    $('speed').value = String(snapshot.speed);
+  }
   const isLoading = snapshot.status === 'loading';
   const wasLoading = state.lastStatus === 'loading';
   state.lastStatus = snapshot.status;
@@ -118,7 +149,7 @@ function render(snapshot) {
     <div class="level-meta">${level.state} · ${level.touch_count} touches · zone ${level.zone_low}–${level.zone_high}</div></div>`).join('')
     : 'No levels confirmed yet.';
 
-  if (!isLoading && snapshot.master_candles.length > 0) {
+  if (!isLoading && snapshot.master_candles.length > 0 && !deferChart) {
     state.allCandles = snapshot.master_candles;
     syncChartToCursor(snapshot);
   }
@@ -126,6 +157,12 @@ function render(snapshot) {
   if (wasLoading && !isLoading && snapshot.status === 'ready') {
     startAutoPlay();
   }
+}
+
+function drawH1Chart(snapshot) {
+  if (!snapshot || !snapshot.master_candles || snapshot.master_candles.length === 0) return;
+  state.allCandles = snapshot.master_candles;
+  syncChartToCursor(snapshot);
 }
 
 function syncChartToCursor(snapshot) {
@@ -297,6 +334,16 @@ function hideHint() {
   hint.classList.remove('finish');
 }
 
+function priceRemainsInZone(snapshot, touchEvent) {
+  const level = snapshot.levels.find(item => item.id === touchEvent.level_id);
+  const candle = snapshot.master_candles.find(item =>
+    item.close_time === snapshot.cursor.bar_time
+  );
+  if (!level || !candle) return false;
+  const close = Number(candle.close);
+  return close >= Number(level.zone_low) && close <= Number(level.zone_high);
+}
+
 async function autoPlayStep() {
   if (!state.animRunning || !state.runId) return;
   try {
@@ -305,11 +352,11 @@ async function autoPlayStep() {
     const beforeDisplay = snapshot.cursor && state.displayFromMs
       && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
     if (!beforeDisplay) {
-      const touchedOnCurrentBar = snapshot.events.some(event =>
+      const touchEvent = snapshot.events.find(event =>
         event.event_type === 'level.touched' &&
         snapshot.cursor && event.sequence === snapshot.cursor.sequence
       );
-      if (touchedOnCurrentBar) {
+      if (touchEvent && priceRemainsInZone(snapshot, touchEvent)) {
         state.detailEnabled = true;
         openDetailPanel();
         $('detail-status').textContent = 'paused on touch — press Step for M1 replay';
@@ -361,10 +408,13 @@ async function command(name) {
       }
     }
     const snapshot = await request(`/api/runs/${state.runId}/${name}`, { method: 'POST' });
-    render(snapshot);
-    if (name === 'step' && snapshot.cursor) {
+    const beforeDisplay = snapshot.cursor && state.displayFromMs
+      && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
+    render(snapshot, name === 'step');
+    if (name === 'step' && snapshot.cursor && !beforeDisplay) {
       await syncDetail(snapshot);
     }
+    drawH1Chart(snapshot);
     if (name === 'reset') resetDetailChart();
   } catch (error) { alert(error.message); }
 }
@@ -451,7 +501,8 @@ function initDetailChart() {
   state.detailChart = LightweightCharts.createChart(container, {
     layout: { background: { color: '#fffdf8' }, textColor: '#71808a' },
     grid: { vertLines: { color: '#eeeae1' }, horzLines: { color: '#eeeae1' } },
-    timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 2 },
+    timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 5, barSpacing: 6 },
+    autoScroll: true,
   });
   state.detailSeries = state.detailChart.addCandlestickSeries({
     upColor: '#198754', downColor: '#ee6c4d',
@@ -481,6 +532,8 @@ function resetDetailChart() {
   state.detailActive = false;
   state.detailEnabled = false;
   state.detailPrevMs = null;
+  state.detailDrawnTime = undefined;
+  state.detailCount = 0;
   clearDetailLevelLines();
   if (state.detailSeries) state.detailSeries.setData([]);
   const container = $('detail-chart');
@@ -491,35 +544,26 @@ function resetDetailChart() {
 
 function stopDetailAnimation() {
   state.detailAnimSeq++;
-  if (state.detailAnimTimer) {
-    clearTimeout(state.detailAnimTimer);
-    state.detailAnimTimer = null;
-  }
 }
 
 function clearDetailViewData() {
   stopDetailAnimation();
   state.detailPrevMs = null;
+  state.detailDrawnTime = undefined;
+  state.detailCount = 0;
   if (state.detailSeries) {
     clearDetailLevelLines();
     state.detailSeries.setData([]);
   }
-  if (state.detailChart) state.detailChart.timeScale().fitContent();
   $('detail-status').textContent = 'cleared — press Step for M1 replay';
 }
 
 async function syncDetail(snapshot) {
   if (!snapshot.cursor) return;
   const cursorMs = new Date(snapshot.cursor.bar_time).getTime();
-  const touchedOnCurrentBar = snapshot.events.some(event =>
-    event.event_type === 'level.touched' &&
-    snapshot.cursor && event.sequence === snapshot.cursor.sequence
-  );
-  if (!state.detailEnabled && !touchedOnCurrentBar) return;
   state.detailEnabled = true;
   openDetailPanel();
   const startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
-  state.detailPrevMs = cursorMs;
   if (cursorMs <= startMs) return;
   try {
     const params = new URLSearchParams({
@@ -527,9 +571,13 @@ async function syncDetail(snapshot) {
       end: new Date(cursorMs).toISOString(),
     });
     const data = await request(`/api/runs/${state.runId}/detail?${params}`);
+    // Advance the window before animating so an interrupted animation
+    // never refetches or re-draws the same hour on the next Step.
+    state.detailPrevMs = cursorMs;
     await animateDetailCandles(data.detail_candles || [], startMs, cursorMs);
-  } catch (_) {
-    $('detail-status').textContent = 'detail unavailable';
+  } catch (error) {
+    console.error('detail load failed:', error);
+    $('detail-status').textContent = `detail error: ${error && error.message ? error.message : 'unavailable'}`;
   }
 }
 
@@ -538,6 +586,7 @@ async function animateDetailCandles(candles, startMs, endMs) {
   initDetailChart();
   if (!state.detailSeries) return;
   const animSeq = ++state.detailAnimSeq;
+  const detailTf = $('detail-tf').value.toUpperCase();
   const bars = candles
     .filter(c => {
       const t = new Date(c.open_time).getTime();
@@ -547,23 +596,38 @@ async function animateDetailCandles(candles, startMs, endMs) {
       time: Math.floor(new Date(c.open_time).getTime() / 1000),
       open: Number(c.open), high: Number(c.high),
       low: Number(c.low), close: Number(c.close),
-    }));
-  $('detail-status').textContent = `${bars.length} ${$('detail-tf').value.toUpperCase()} · ${utcFormat(endMs)} UTC`;
-  if (!bars.length) return;
-  state.detailSeries.setData(bars.slice(0, 1));
-  const timeScale = state.detailChart.timeScale();
-  timeScale.setVisibleLogicalRange({
-    from: -Math.max(2, Math.round(bars.length * 0.05)),
-    to: bars.length,
-  });
-  for (let i = 1; i < bars.length; i++) {
+    }))
+    .sort((a, b) => a.time - b.time);
+  let lastTime = typeof state.detailDrawnTime === 'number' ? state.detailDrawnTime : undefined;
+  const newBars = bars.filter(bar => lastTime === undefined || bar.time > lastTime);
+  $('detail-status').textContent = `${state.detailCount}/${state.detailCount + newBars.length} ${detailTf} · ${utcFormat(endMs)} UTC`;
+  if (!newBars.length) return;
+  // Re-anchor the viewport to the realtime edge once per hour batch so newly
+  // appended candles are always on screen, without touching the drawn data.
+  state.detailChart.timeScale().resetTimeScale();
+  const delay = Math.max(30, Math.round(1000 / (Number($('speed').value) || 1)));
+  for (let i = 0; i < newBars.length; i++) {
     if (animSeq !== state.detailAnimSeq || !state.detailActive) return;
-    state.detailSeries.update(bars[i]);
-    timeScale.scrollToRealtime();
-    await sleep(Math.max(30, Math.round(1000 / (Number($('speed').value) || 1))));
+    const bar = newBars[i];
+    if (lastTime !== undefined && bar.time <= lastTime) continue;
+    try {
+      state.detailSeries.update(bar);
+    } catch (error) {
+      console.error('detail update failed:', bar, error);
+      $('detail-status').textContent = `draw error at ${utcFormat(bar.time * 1000)} UTC`;
+      return;
+    }
+    lastTime = bar.time;
+    state.detailDrawnTime = bar.time;
+    state.detailCount += 1;
+    $('detail-status').textContent = `${state.detailCount} ${detailTf} · ${utcFormat(endMs)} UTC`;
+    if (i < newBars.length - 1) {
+      await sleep(delay);
+    }
   }
 }
 
 checkServer();
+loadReplayConfig();
 loadInstruments(false);
 setInterval(checkServer, 5000);
