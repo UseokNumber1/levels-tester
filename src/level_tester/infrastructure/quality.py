@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from itertools import pairwise
 
 from level_tester.domain.models import Candle
 
@@ -22,11 +23,10 @@ def inspect_candles(candles: list[Candle], expected_step: timedelta) -> DataQual
     """Check data without filling gaps: missing exchange data must remain visible."""
     ordered = sorted(candles, key=lambda candle: candle.open_time)
     duplicate_count = sum(
-        left.open_time == right.open_time for left, right in zip(ordered, ordered[1:])
+        left.open_time == right.open_time for left, right in pairwise(ordered)
     )
     gap_count = sum(
-        right.open_time - left.open_time != expected_step
-        for left, right in zip(ordered, ordered[1:])
+        right.open_time - left.open_time != expected_step for left, right in pairwise(ordered)
     )
     invalid_count = sum(
         candle.low > min(candle.open, candle.close)

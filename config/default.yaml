@@ -26,6 +26,16 @@ algorithm:
     min_touches: 2
     max_lifetime_bars: null
     tick_size: 0.01
+  confirmation:
+    timeframe: 1m
+    required_bars: 2
+    max_wait_bars: 15
+    entry_on_next_bar: true
+  execution:
+    stop_buffer_percent: 0.002
+    risk_reward: 2
+    fee_percent: 0
+    slippage_percent: 0
   outcomes:
     - name: quick_rebound
       wait_bars: 3

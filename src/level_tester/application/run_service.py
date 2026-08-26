@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import RLock
 from uuid import uuid4
 
@@ -171,7 +171,7 @@ def _validate_symbol(symbol: str) -> None:
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("datetimes must be timezone-aware UTC values")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _window_json(window: ReplayWindow) -> dict[str, str]:

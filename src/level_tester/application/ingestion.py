@@ -50,9 +50,7 @@ class DataIngestionService:
             try:
                 candles = self.client.klines(symbol, timeframe, start, end)
                 break
-            except (
-                Exception
-            ) as exc:  # network/rate-limit adapters expose one stable failure boundary
+            except Exception as exc:  # noqa: BLE001 - adapter errors share one retry boundary
                 last_error = exc
                 if attempt < self.retries:
                     sleep(self.backoff_seconds * (2**attempt))

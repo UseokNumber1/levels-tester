@@ -16,6 +16,9 @@ def test_default_algorithm_configuration_matches_replay_specification() -> None:
     assert config.level.min_touches == 2
     assert config.level.breakout == "wick"
     assert config.detail_timeframe == "1m"
+    assert config.confirmation.timeframe == "1m"
+    assert config.confirmation.required_bars == 2
+    assert config.execution.risk_reward == Decimal(2)
     assert [profile.name for profile in config.outcome_profiles] == [
         "quick_rebound",
         "patient_rebound",

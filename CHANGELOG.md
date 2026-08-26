@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.1 (2026-08-26)
+
+### Added
+
+- **Modular domain packages**: configuration, search, confirmation, execution and evaluation boundaries
+- **Entry confirmation pipeline**: H1 touches are refined against M1/M5 candles and confirmed setups are created after the configured candle pattern
+- **Virtual execution**: confirmed setups now produce trades with entry, stop, take, fees, slippage and PnL
+- **Trade events**: replay snapshots and event history include `entry.confirmed`, `trade.opened` and `trade.closed`
+- **Module documentation**: added `docs/MODULES.md` describing responsibilities and dependency rules
+- **Trade pipeline tests**: added coverage for detail-touch refinement and take-profit execution
+
+### Changed
+
+- **Replay orchestration**: `ReplayEngine` coordinates search, confirmation, execution and evaluation modules
+- **Detail data handling**: lazily loaded M1/M5 candles are merged and can be processed after the H1 touch event
+- **Configuration**: added confirmation and execution settings to `config/default.yaml`; selected detail timeframe is applied to confirmation
+- **Domain layout**: pivot/level logic moved under `domain/search`, and outcome logic under `domain/evaluation`
+
+### Refactored
+
+- **Code quality**: applied the project Ruff rules across source and test code
+
+### Fixed
+
+- **Next-bar entry boundary**: a candle opening exactly at confirmation close is now recognized as the next entry candle
+- **Late touch refinement**: H1 touch events now retain their source candle window for exact M1/M5 refinement
+
 ## v0.3.0 (2026-08-26)
 
 ### Added

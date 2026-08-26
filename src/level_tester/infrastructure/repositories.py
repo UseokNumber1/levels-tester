@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -55,10 +55,10 @@ class CandleRepository:
         )
         return [
             Candle(
-                row.open_time.replace(tzinfo=timezone.utc)
+                row.open_time.replace(tzinfo=UTC)
                 if row.open_time.tzinfo is None
                 else row.open_time,
-                row.close_time.replace(tzinfo=timezone.utc)
+                row.close_time.replace(tzinfo=UTC)
                 if row.close_time.tzinfo is None
                 else row.close_time,
                 row.open,
@@ -97,7 +97,7 @@ class CandleRepository:
             )
         )
         return {
-            value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value
             for value in values
         }
 

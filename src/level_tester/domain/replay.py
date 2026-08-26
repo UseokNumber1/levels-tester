@@ -1,12 +1,15 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any
 
-from level_tester.domain.levels import LevelBook, LevelConfig
+from level_tester.domain.configuration import StrategyConfig
+from level_tester.domain.confirmation import EntryConfirmation
+from level_tester.domain.evaluation import OutcomeEvaluator
+from level_tester.domain.execution import TradeExecution
 from level_tester.domain.models import Candle, LevelEvent, Pivot, as_json
-from level_tester.domain.outcomes import OutcomeEvaluator, OutcomeProfile
-from level_tester.domain.pivots import CausalPivotDetector, PivotDetectorConfig
+from level_tester.domain.search import CausalPivotDetector, LevelBook
 
 
 class ReplayStatus(StrEnum):
@@ -34,9 +37,9 @@ class ReplayWindow:
             for value in (self.display_from, self.effective_to, self.calculation_from)
         ):
             raise ValueError("ReplayWindow datetimes must be timezone-aware")
-        object.__setattr__(self, "display_from", self.display_from.astimezone(timezone.utc))
-        object.__setattr__(self, "effective_to", self.effective_to.astimezone(timezone.utc))
-        object.__setattr__(self, "calculation_from", self.calculation_from.astimezone(timezone.utc))
+        object.__setattr__(self, "display_from", self.display_from.astimezone(UTC))
+        object.__setattr__(self, "effective_to", self.effective_to.astimezone(UTC))
+        object.__setattr__(self, "calculation_from", self.calculation_from.astimezone(UTC))
         if self.calculation_from > self.display_from:
             raise ValueError("calculation_from must not be after display_from")
         if self.display_from > self.effective_to:
@@ -55,19 +58,10 @@ class ReplayCursor:
             raise ValueError("ReplayCursor.bar_time must be timezone-aware")
         if self.sequence < 0:
             raise ValueError("ReplayCursor.sequence must be non-negative")
-        object.__setattr__(self, "bar_time", self.bar_time.astimezone(timezone.utc))
+        object.__setattr__(self, "bar_time", self.bar_time.astimezone(UTC))
 
 
-@dataclass(frozen=True, slots=True)
-class ReplayConfig:
-    pivot: PivotDetectorConfig = PivotDetectorConfig()
-    level: LevelConfig = LevelConfig()
-    detail_timeframe: str = "1m"
-    outcome_profiles: tuple[OutcomeProfile, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.detail_timeframe not in {"1m", "5m"}:
-            raise ValueError("detail_timeframe must be 1m or 5m")
+ReplayConfig = StrategyConfig
 
 
 class ReplayEngine:
@@ -103,7 +97,7 @@ class ReplayEngine:
         ordered = sorted(candles, key=lambda candle: candle.open_time)
         if any(candle.timeframe != timeframe for candle in ordered):
             raise ValueError(f"timeline contains a candle with timeframe other than {timeframe}")
-        if any(left.open_time == right.open_time for left, right in zip(ordered, ordered[1:])):
+        if any(left.open_time == right.open_time for left, right in pairwise(ordered)):
             raise ValueError("timeline contains duplicate candle open_time values")
         return ordered
 
@@ -127,6 +121,8 @@ class ReplayEngine:
         self._detector = CausalPivotDetector(self.config.pivot)
         self._levels = LevelBook(self.run_id, self.config.level)
         self._levels.set_candles(list(self._master_candles))
+        self._confirmation = EntryConfirmation(self.run_id, self.config.confirmation)
+        self._execution = TradeExecution(self.run_id, self.config.execution)
         self._outcomes = OutcomeEvaluator(self.run_id, self.config.outcome_profiles)
         self._pivots: list[Pivot] = []
         self._events: list[LevelEvent] = []
@@ -135,7 +131,30 @@ class ReplayEngine:
         self._status = ReplayStatus.READY
 
     def set_detail_candles(self, candles: list[Candle]) -> None:
-        self._detail_candles = self._validate_timeline(candles, self.config.detail_timeframe)
+        combined = {
+            (detail.timeframe, detail.open_time): detail
+            for detail in self._detail_candles
+        }
+        combined.update({(detail.timeframe, detail.open_time): detail for detail in candles})
+        self._detail_candles = self._validate_timeline(
+            list(combined.values()), self.config.detail_timeframe
+        )
+        if self._cursor is not None:
+            visible_detail = [
+                detail
+                for detail in self._detail_candles
+                if detail.close_time <= self._cursor.bar_time
+            ]
+            historical_touches = [
+                event
+                for event in self._events
+                if event.event_type == "level.touched"
+                and event.sequence <= self._cursor.sequence
+            ]
+            pipeline_events = self._evaluate_trade_pipeline(
+                visible_detail, historical_touches, self._cursor.sequence
+            )
+            self._events.extend(pipeline_events)
 
     @property
     def detail_candles(self) -> tuple[Candle, ...]:
@@ -198,6 +217,12 @@ class ReplayEngine:
                 )
         for level in self._levels.levels:
             emitted.extend(self._levels.evaluate(candle, sequence, level))
+        visible_detail = [
+            detail
+            for detail in self._detail_candles
+            if detail.close_time <= candle.close_time
+        ]
+        emitted.extend(self._evaluate_trade_pipeline(visible_detail, emitted, sequence))
         emitted.extend(self._outcomes.evaluate(candle, self._levels.levels, emitted, sequence))
         self._events.extend(emitted)
         if self._next_index == len(self._source_candles):
@@ -205,6 +230,71 @@ class ReplayEngine:
         else:
             self._status = ReplayStatus.PAUSED
         return self.snapshot(emitted)
+
+    def _evaluate_trade_pipeline(
+        self,
+        detail_candles: list[Candle],
+        events: list[LevelEvent],
+        sequence: int,
+    ) -> list[LevelEvent]:
+        setup_statuses = {setup.id: setup.status for setup in self._confirmation.setups}
+        trade_statuses = {trade.id: trade.status for trade in self._execution.trades}
+        self._confirmation.evaluate(
+            detail_candles, self._levels.levels, events, sequence
+        )
+        self._execution.evaluate(
+            self._confirmation.setups, self._levels.levels, detail_candles
+        )
+        emitted: list[LevelEvent] = []
+        for setup in self._confirmation.setups:
+            if (
+                setup.status.value == "entry_confirmed"
+                and setup_statuses.get(setup.id) != setup.status
+            ):
+                emitted.append(
+                    self._event(
+                        sequence,
+                        setup.confirmed_time or setup.touch_time,
+                        "entry.confirmed",
+                        setup.level_id,
+                        {"setup_id": setup.id, "entry_time": setup.entry_time},
+                    )
+                )
+        for trade in self._execution.trades:
+            if trade.id not in trade_statuses:
+                emitted.append(
+                    self._event(
+                        sequence,
+                        trade.entry_time,
+                        "trade.opened",
+                        trade.setup_id,
+                        {
+                            "trade_id": trade.id,
+                            "entry_price": str(trade.entry_price),
+                            "stop_price": str(trade.stop_price),
+                            "take_price": str(trade.take_price),
+                        },
+                    )
+                )
+            if (
+                trade.status.value == "closed"
+                and trade_statuses.get(trade.id) != trade.status
+            ):
+                emitted.append(
+                    self._event(
+                        sequence,
+                        trade.exit_time or trade.entry_time,
+                        "trade.closed",
+                        trade.setup_id,
+                        {
+                            "trade_id": trade.id,
+                            "exit_reason": trade.exit_reason,
+                            "exit_price": str(trade.exit_price),
+                            "pnl": str(trade.pnl),
+                        },
+                    )
+                )
+        return emitted
 
     def play(self) -> dict[str, Any]:
         if self._status in {ReplayStatus.COMPLETED, ReplayStatus.CANCELLED}:
@@ -256,6 +346,8 @@ class ReplayEngine:
                 "pivots": self._pivots,
                 "levels": self._levels.levels,
                 "outcomes": self._outcomes.outcomes,
+                "setups": self._confirmation.setups,
+                "trades": self._execution.trades,
                 "master_candles": visible_master,
                 "detail_candles": visible_detail,
                 "events": recent_events if recent_events is not None else self._events,

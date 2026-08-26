@@ -1,13 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from level_tester.domain.models import Candle, LevelState
-from level_tester.domain.levels import LevelConfig
-from level_tester.domain.pivots import CausalPivotDetector, PivotDetectorConfig
 from level_tester.domain.replay import ReplayConfig, ReplayEngine, ReplayWindow
-
-
-UTC = timezone.utc
+from level_tester.domain.search import CausalPivotDetector, LevelConfig, PivotDetectorConfig
 
 
 def candle(index: int, high: str, low: str, close: str | None = None) -> Candle:
@@ -21,7 +17,7 @@ def candle(index: int, high: str, low: str, close: str | None = None) -> Candle:
         Decimal(high),
         Decimal(low),
         close_price,
-        Decimal("10"),
+        Decimal(10),
     )
 
 
@@ -117,7 +113,7 @@ def test_active_level_emits_touch_and_then_breakout() -> None:
         pivot=PivotDetectorConfig(wing=1, min_volume_ratio=None),
         level=LevelConfig(
             zone_percent=Decimal("0.008"),
-            min_bounce_percent=Decimal("0"),
+            min_bounce_percent=Decimal(0),
             min_touches=1,
             breakout="wick",
         ),

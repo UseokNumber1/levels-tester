@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from time import sleep
 
 from fastapi.testclient import TestClient
@@ -7,7 +7,7 @@ from level_tester.api.app import app
 
 
 def test_run_commands_and_snapshot() -> None:
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     candles = []
     for index in range(8):
         opened = start.replace(hour=12) - timedelta(hours=8 - index)

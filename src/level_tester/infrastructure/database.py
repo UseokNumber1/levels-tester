@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-
-from dataclasses import dataclass
 
 from sqlalchemy import (
     DateTime,
@@ -206,5 +205,5 @@ def check_database(session_factory) -> DatabaseCheck:
             missing_columns=tuple(sorted(missing_columns)),
             missing_indexes=tuple(sorted(missing_indexes)),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - database health must return a diagnostic result
         return DatabaseCheck(False, False, "unknown", error=str(exc))

@@ -25,8 +25,8 @@ class CausalPivotDetector:
         self.config = config or PivotDetectorConfig()
         self._candles: list[Candle] = []
         self._emitted_indices: set[int] = set()
-        self._avg_volume: Decimal = Decimal("0")
-        self._volume_sum: Decimal = Decimal("0")
+        self._avg_volume: Decimal = Decimal(0)
+        self._volume_sum: Decimal = Decimal(0)
 
     @property
     def candles(self) -> tuple[Candle, ...]:
@@ -49,9 +49,12 @@ class CausalPivotDetector:
         center = self._candles[index]
         left = self._candles[index - wing : index]
         right = self._candles[index + 1 : index + wing + 1]
-        if self.config.min_volume_ratio is not None and self._avg_volume > 0:
-            if center.volume < self._avg_volume * self.config.min_volume_ratio:
-                return []
+        if (
+            self.config.min_volume_ratio is not None
+            and self._avg_volume > 0
+            and center.volume < self._avg_volume * self.config.min_volume_ratio
+        ):
+            return []
 
         result: list[Pivot] = []
         if center.high > max(bar.high for bar in left) and center.high >= max(

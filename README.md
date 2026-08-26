@@ -101,3 +101,6 @@ powershell -ExecutionPolicy Bypass -File scripts\init_mariadb.ps1
 - Состояние доменного ядра не зависит от FastAPI и MariaDB.
 
 Правила алгоритма подробно зафиксированы в `docs/SPECIFICATION.md`.
+
+Границы доменных модулей и порядок торгового конвейера описаны в
+`docs/MODULES.md`.

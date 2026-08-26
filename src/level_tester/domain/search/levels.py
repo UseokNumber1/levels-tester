@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from statistics import median
-from uuid import uuid5, NAMESPACE_URL
+from uuid import NAMESPACE_URL, uuid5
 
 from level_tester.domain.models import Candle, Level, LevelEvent, LevelSide, LevelState, Pivot
 
@@ -27,7 +27,7 @@ class LevelConfig:
 
 
 def quantize_tick(value: Decimal, tick_size: Decimal) -> Decimal:
-    units = (value / tick_size).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    units = (value / tick_size).quantize(Decimal(1), rounding=ROUND_HALF_UP)
     return units * tick_size
 
 
@@ -261,5 +261,10 @@ class LevelBook:
             event_type=event_type,
             level_id=level.id,
             reason=reason,
-            payload={"state": level.state.value, "price": str(level.price)},
+            payload={
+                "state": level.state.value,
+                "price": str(level.price),
+                "candle_open_time": candle.open_time.isoformat(),
+                "candle_close_time": candle.close_time.isoformat(),
+            },
         )

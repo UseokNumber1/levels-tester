@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -11,7 +11,7 @@ from level_tester.infrastructure.database import InstrumentRow
 
 class InstrumentRepository:
     def upsert_many(self, session: Session, instruments: list[dict]) -> int:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         changed = 0
         for item in instruments:
             row = session.scalar(

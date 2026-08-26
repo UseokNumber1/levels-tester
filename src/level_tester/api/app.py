@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Thread
@@ -13,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+
 from level_tester.application.ingestion import DataIngestionService
 from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
@@ -27,6 +29,8 @@ from level_tester.infrastructure.database import (
 from level_tester.infrastructure.instruments import InstrumentRepository
 from level_tester.infrastructure.repositories import CandleRepository, RunRepository
 from level_tester.settings import get_settings, load_replay_config
+
+logger = logging.getLogger(__name__)
 
 
 class CandleInput(BaseModel):
@@ -85,7 +89,7 @@ async def lifespan(application: FastAPI):
     try:
         ensure_schema(session_factory)
     except Exception:
-        pass
+        logger.debug("database schema initialization failed", exc_info=True)
     database_check = check_database(session_factory)
     application.state.database_check = database_check
     application.state.catalog_sync = "not_started"
@@ -96,7 +100,7 @@ async def lifespan(application: FastAPI):
             try:
                 _sync_catalog()
                 application.state.catalog_sync = "completed"
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - background boundary reports failure in status
                 application.state.catalog_sync = f"failed: {exc}"
 
         Thread(target=background_sync, daemon=True).start()
@@ -105,7 +109,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version="0.3.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
@@ -359,12 +363,16 @@ def _load_run(run_id: str, seed: list[Candle] | None) -> None:
                 raise RuntimeError("no H1 candles were loaded")
         service.update_loading(run_id, 95, "initializing engine")
         _persist_run(run)
-        config = default_config
-        if config.detail_timeframe != run.detail_timeframe:
-            config = replace(config, detail_timeframe=run.detail_timeframe)
+        config = replace(
+            default_config,
+            detail_timeframe=run.detail_timeframe,
+            confirmation=replace(
+                default_config.confirmation, timeframe=run.detail_timeframe
+            ),
+        )
         service.complete_loading(run_id, candles, None, config, instrument.id)
         _persist_run(service.get(run_id))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - loading boundary stores failure on the run
         failed = service.fail_loading(run_id, str(exc))
         _persist_run(failed)
 
@@ -406,7 +414,7 @@ def _persist_run(run) -> None:
                     run.engine.cursor.bar_time,
                     run.engine.checkpoint(),
                 )
-    except Exception:
+    except Exception:  # noqa: BLE001 - persistence must not hide the in-memory run
         # The in-memory state remains available; /api/status exposes DB failure.
         return
 
@@ -462,9 +470,9 @@ def _validate_range(start: datetime, end: datetime) -> None:
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise HTTPException(status_code=422, detail="timestamps must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _last_closed_boundary() -> datetime:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return now.replace(minute=0, second=0, microsecond=0)

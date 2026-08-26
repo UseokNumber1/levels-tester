@@ -3,11 +3,9 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from level_tester.domain.levels import LevelConfig
 from level_tester.domain.models import Candle, LevelState
-from level_tester.domain.pivots import PivotDetectorConfig
 from level_tester.domain.replay import ReplayConfig, ReplayEngine, ReplayWindow
-
+from level_tester.domain.search import LevelConfig, PivotDetectorConfig
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "golden_replay.json"
 

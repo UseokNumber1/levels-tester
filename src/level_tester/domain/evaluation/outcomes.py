@@ -73,9 +73,9 @@ class OutcomeEvaluator:
                 continue
             profile = next(item for item in self.profiles if item.name == outcome.profile_name)
             outcome.bars_waited += 1
-            success_price = level.price * (Decimal("1") + profile.min_bounce_percent)
+            success_price = level.price * (Decimal(1) + profile.min_bounce_percent)
             if level.side == LevelSide.RESISTANCE:
-                success = candle.close <= level.price * (Decimal("1") - profile.min_bounce_percent)
+                success = candle.close <= level.price * (Decimal(1) - profile.min_bounce_percent)
             else:
                 success = candle.close >= success_price
             failure = level.broken_time == candle.close_time or level.state.value == "broken"

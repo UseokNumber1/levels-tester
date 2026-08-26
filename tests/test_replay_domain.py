@@ -1,11 +1,8 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from level_tester.domain.replay import ReplayCursor, ReplayStatus, ReplayWindow
-
-
-UTC = timezone.utc
 
 
 def test_replay_window_keeps_display_and_calculation_ranges_separate() -> None:
@@ -22,7 +19,7 @@ def test_replay_window_keeps_display_and_calculation_ranges_separate() -> None:
 
 def test_replay_rejects_naive_cursor_time() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        ReplayCursor(bar_time=datetime(2026, 1, 1), sequence=0)
+        ReplayCursor(bar_time=datetime(2026, 1, 1), sequence=0)  # noqa: DTZ001
 
 
 def test_replay_cursor_rejects_negative_sequence() -> None:

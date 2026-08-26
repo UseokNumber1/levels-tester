@@ -1,15 +1,16 @@
-from functools import lru_cache
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 
+import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import yaml
 
-from level_tester.domain.levels import LevelConfig
-from level_tester.domain.outcomes import OutcomeProfile
-from level_tester.domain.pivots import PivotDetectorConfig
-from level_tester.domain.replay import ReplayConfig
+from level_tester.domain.configuration import StrategyConfig
+from level_tester.domain.confirmation import ConfirmationConfig
+from level_tester.domain.evaluation import OutcomeProfile
+from level_tester.domain.execution import ExecutionConfig
+from level_tester.domain.search import LevelConfig, PivotDetectorConfig
 
 
 class Settings(BaseSettings):
@@ -40,12 +41,14 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def load_replay_config(path: str | Path = "config/default.yaml") -> ReplayConfig:
+def load_replay_config(path: str | Path = "config/default.yaml") -> StrategyConfig:
     """Load non-secret algorithm parameters; secrets never come from YAML."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     algorithm = raw.get("algorithm", {})
     pivot = algorithm.get("pivot", {})
     level = algorithm.get("level", {})
+    confirmation = algorithm.get("confirmation", {})
+    execution = algorithm.get("execution", {})
     profiles = tuple(
         OutcomeProfile(
             item["name"],
@@ -54,7 +57,7 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> ReplayConfig
         )
         for item in algorithm.get("outcomes", [])
     )
-    return ReplayConfig(
+    return StrategyConfig(
         pivot=PivotDetectorConfig(
             wing=int(pivot.get("wing", 2)),
             min_volume_ratio=Decimal(str(pivot["min_volume_ratio"]))
@@ -71,4 +74,16 @@ def load_replay_config(path: str | Path = "config/default.yaml") -> ReplayConfig
         ),
         detail_timeframe=raw.get("replay", {}).get("detail_timeframes", ["1m"])[0],
         outcome_profiles=profiles,
+        confirmation=ConfirmationConfig(
+            timeframe=confirmation.get("timeframe", "5m"),
+            required_bars=int(confirmation.get("required_bars", 2)),
+            max_wait_bars=int(confirmation.get("max_wait_bars", 15)),
+            entry_on_next_bar=bool(confirmation.get("entry_on_next_bar", True)),
+        ),
+        execution=ExecutionConfig(
+            stop_buffer_percent=Decimal(str(execution.get("stop_buffer_percent", "0.002"))),
+            risk_reward=Decimal(str(execution.get("risk_reward", "2"))),
+            fee_percent=Decimal(str(execution.get("fee_percent", "0"))),
+            slippage_percent=Decimal(str(execution.get("slippage_percent", "0"))),
+        ),
     )

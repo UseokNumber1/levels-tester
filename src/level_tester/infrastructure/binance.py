@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -62,7 +62,7 @@ class BinanceFuturesClient:
             page = [
                 candle
                 for candle in (_candle_from_binance(row, timeframe) for row in rows)
-                if candle.close_time <= datetime.now(timezone.utc)
+                if candle.close_time <= datetime.now(UTC)
             ]
             output.extend(page)
             if not page:
@@ -109,14 +109,14 @@ class BinanceFuturesClient:
 def _millis(value: datetime) -> int:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Binance range must use timezone-aware datetimes")
-    return int(value.astimezone(timezone.utc).timestamp() * 1000)
+    return int(value.astimezone(UTC).timestamp() * 1000)
 
 
 def _candle_from_binance(row: list[Any], timeframe: str) -> Candle:
     if len(row) < 7:
         raise BinanceError("Binance kline row is incomplete")
-    opened = datetime.fromtimestamp(int(row[0]) / 1000, timezone.utc)
-    closed = datetime.fromtimestamp(int(row[6]) / 1000, timezone.utc)
+    opened = datetime.fromtimestamp(int(row[0]) / 1000, UTC)
+    closed = datetime.fromtimestamp(int(row[6]) / 1000, UTC)
     return Candle(
         opened,
         closed,

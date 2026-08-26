@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from level_tester.domain.models import Candle
@@ -20,15 +20,15 @@ def test_candle_upsert_is_idempotent() -> None:
     )
     session.add(instrument)
     session.commit()
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     candle = Candle(
         start,
         start + timedelta(hours=1),
-        Decimal("1"),
-        Decimal("2"),
-        Decimal("0"),
-        Decimal("1"),
-        Decimal("3"),
+        Decimal(1),
+        Decimal(2),
+        Decimal(0),
+        Decimal(1),
+        Decimal(3),
     )
     repository = CandleRepository()
     assert repository.upsert_many(session, instrument.id, [candle]) == 1
