@@ -6,6 +6,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from level_tester.domain.search.levels import price_precision_from_tick
 from level_tester.infrastructure.database import InstrumentRow
 
 
@@ -26,6 +27,16 @@ class InstrumentRepository:
             row.base_asset = item.get("base_asset", "")
             row.status = item.get("status", "TRADING")
             row.daily_volume = Decimal(str(item.get("daily_volume", "0")))
+            tick_size = item.get("tick_size")
+            if tick_size is not None:
+                row.tick_size = Decimal(str(tick_size))
+            elif row.tick_size is None:
+                row.tick_size = Decimal("0.01")
+            precision = item.get("price_precision")
+            if precision is not None:
+                row.price_precision = int(precision)
+            elif row.price_precision is None:
+                row.price_precision = price_precision_from_tick(row.tick_size)
             row.last_synced_at = now
             changed += 1
         session.commit()

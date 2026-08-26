@@ -4,8 +4,26 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from level_tester.domain.search.levels import price_precision_from_tick
 from level_tester.infrastructure.binance import BinanceFuturesClient
 from level_tester.infrastructure.instruments import InstrumentRepository
+
+
+def _extract_price_spec(item: dict) -> tuple[Decimal | None, int | None]:
+    """Read the exchange price step and display precision from symbol filters."""
+    tick_size: Decimal | None = None
+    price_precision = item.get("pricePrecision")
+    for filt in item.get("filters", []):
+        if filt.get("filterType") != "PRICE_FILTER":
+            continue
+        tick = filt.get("tickSize")
+        if tick:
+            tick_size = Decimal(str(tick))
+        if price_precision is None and tick_size is not None:
+            price_precision = price_precision_from_tick(tick_size)
+    if price_precision is not None:
+        price_precision = int(price_precision)
+    return tick_size, price_precision
 
 
 class InstrumentService:
@@ -27,6 +45,7 @@ class InstrumentService:
             }:
                 continue
             ticker = ticker_by_symbol.get(item.get("symbol"), {})
+            tick_size, price_precision = _extract_price_spec(item)
             instruments.append(
                 {
                     "symbol": item.get("symbol", ""),
@@ -34,6 +53,8 @@ class InstrumentService:
                     "quote_asset": item.get("quoteAsset", "USDT"),
                     "status": item.get("status", "UNKNOWN"),
                     "daily_volume": Decimal(str(ticker.get("quoteVolume", "0"))),
+                    "tick_size": tick_size,
+                    "price_precision": price_precision,
                 }
             )
         return self.repository.upsert_many(session, instruments)

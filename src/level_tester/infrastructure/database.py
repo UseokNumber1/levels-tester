@@ -33,6 +33,8 @@ class InstrumentRow(Base):
     base_asset: Mapped[str] = mapped_column(String(20), default="")
     status: Mapped[str] = mapped_column(String(20), index=True, default="TRADING")
     daily_volume: Mapped[Decimal] = mapped_column(Numeric(40, 16), default=0)
+    tick_size: Mapped[Decimal] = mapped_column(Numeric(32, 16), default=Decimal("0.01"))
+    price_precision: Mapped[int] = mapped_column(Integer, default=8)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -164,7 +166,34 @@ def create_session_factory(database_url: str):
 
 def ensure_schema(session_factory) -> None:
     """Create missing tables and indexes; safe to call on every startup."""
-    Base.metadata.create_all(session_factory.engine)
+    engine = session_factory.engine
+    Base.metadata.create_all(engine)
+    # SQLite does not add columns to existing tables via create_all; backfill
+    # any columns the models gained after the schema was first created.
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        for table_name, table in Base.metadata.tables.items():
+            if table_name not in set(inspector.get_table_names()):
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                ddl_type = str(column.type.compile(dialect=engine.dialect))
+                default_value = None
+                if column.default is not None and getattr(column.default, "is_scalar", False):
+                    default_value = column.default.arg
+                default_clause = ""
+                if default_value is not None:
+                    if isinstance(default_value, Decimal):
+                        default_clause = f" DEFAULT '{default_value}'"
+                    elif isinstance(default_value, str):
+                        default_clause = f" DEFAULT '{default_value}'"
+                    else:
+                        default_clause = f" DEFAULT {default_value}"
+                connection.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN {column.name} {ddl_type}{default_clause}")
+                )
 
 
 def check_database(session_factory) -> DatabaseCheck:

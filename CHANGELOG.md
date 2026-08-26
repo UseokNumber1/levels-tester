@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.6 (2026-08-26)
+
+### Added
+
+- **Per-instrument price standard.** Levels now use each instrument's exchange `tick_size` (from Binance `PRICE_FILTER.tickSize`) instead of a fixed `0.01`, and the display precision (`pricePrecision`) is carried through to the UI. This fixes inaccurate level detection on low-priced coins (e.g. XRP): prices quantize to the real tick (0.0001 → exact 0.5234) and the zone is the intended ~0.8% instead of a coarse ~1.9%
+- `InstrumentRow` gained `tick_size` and `price_precision` columns; `ensure_schema` back-fills them on existing databases via `ALTER TABLE`
+- `price_precision_from_tick` helper derives display precision from a tick size when the exchange does not supply it
+
+### Changed
+
+- Engine uses the instrument `tick_size` in `LevelConfig` (`api/app.py`); `tick_size`/`price_precision` are exposed on every replay snapshot
+- Web UI applies the instrument `priceFormat` (precision + minMove) to both H1 and detail charts and formats level prices/zones with `fmtPrice`, dropping redundant decimal places
+
+### Tests
+
+- Added coverage for exchange filter parsing (`_extract_price_spec`) and instrument sync persistence of `tick_size`/`price_precision`
+
 ## v0.4.5 (2026-08-26)
 
 ### Changed

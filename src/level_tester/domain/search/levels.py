@@ -30,6 +30,15 @@ def quantize_tick(value: Decimal, tick_size: Decimal) -> Decimal:
     return units * tick_size
 
 
+def price_precision_from_tick(tick_size: Decimal) -> int:
+    """Number of decimal places implied by a tick size (e.g. 0.0001 -> 4)."""
+    text = str(tick_size)
+    if "." not in text:
+        return 0
+    fraction = text.split(".", 1)[1]
+    return len(fraction.rstrip("0"))
+
+
 class LevelBook:
     def __init__(self, run_id: str, config: LevelConfig | None = None) -> None:
         self.run_id = run_id

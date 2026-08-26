@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from threading import RLock
 from uuid import uuid4
 
@@ -28,6 +29,8 @@ class Run:
     error_message: str | None = None
     instrument_id: int | None = None
     detail_timeframe: str = "1m"
+    tick_size: Decimal | None = None
+    price_precision: int | None = None
 
 
 class RunService:
@@ -66,6 +69,8 @@ class RunService:
         detail_candles: list[Candle] | None,
         replay_config: ReplayConfig,
         instrument_id: int | None = None,
+        tick_size: Decimal | None = None,
+        price_precision: int | None = None,
     ) -> Run:
         run = self.get(run_id)
         run.engine = ReplayEngine(run.id, run.window, master_candles, detail_candles, replay_config)
@@ -77,6 +82,8 @@ class RunService:
         run.loading_stage = ""
         run.error_message = None
         run.instrument_id = instrument_id
+        run.tick_size = tick_size
+        run.price_precision = price_precision
         run.status = ReplayStatus.READY
         return run
 
@@ -159,6 +166,8 @@ class RunService:
                 "progress": run.progress,
                 "error_message": run.error_message,
                 "window": _window_json(run.window),
+                "tick_size": str(run.tick_size) if run.tick_size is not None else None,
+                "price_precision": run.price_precision,
             }
         )
         return snapshot
@@ -202,6 +211,8 @@ def _loading_snapshot(run: Run) -> dict:
         "config_hash": run.config_hash,
         "data_set_id": run.data_set_id,
         "window": _window_json(run.window),
+        "tick_size": None,
+        "price_precision": None,
     }
 
 

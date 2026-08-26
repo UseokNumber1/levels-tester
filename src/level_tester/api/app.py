@@ -20,6 +20,7 @@ from level_tester.application.ingestion import DataIngestionService
 from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
 from level_tester.domain.models import Candle
+from level_tester.domain.search.levels import price_precision_from_tick
 from level_tester.infrastructure.binance import BinanceFuturesClient
 from level_tester.infrastructure.database import (
     InstrumentRow,
@@ -121,7 +122,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.4.5", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version="0.4.6", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
@@ -388,14 +389,29 @@ def _load_run(run_id: str, seed: list[Candle] | None) -> None:
                 raise RuntimeError("no H1 candles were loaded")
         service.update_loading(run_id, 95, "initializing engine")
         _persist_run(run)
+        instrument_tick = instrument.tick_size or Decimal("0.01")
+        instrument_precision = (
+            instrument.price_precision
+            if instrument.price_precision
+            else price_precision_from_tick(instrument_tick)
+        )
         config = replace(
             default_config,
+            level=replace(default_config.level, tick_size=instrument_tick),
             detail_timeframe=run.detail_timeframe,
             confirmation=replace(
                 default_config.confirmation, timeframe=run.detail_timeframe
             ),
         )
-        service.complete_loading(run_id, candles, None, config, instrument.id)
+        service.complete_loading(
+            run_id,
+            candles,
+            None,
+            config,
+            instrument.id,
+            tick_size=instrument_tick,
+            price_precision=instrument_precision,
+        )
         _persist_run(service.get(run_id))
     except Exception as exc:  # noqa: BLE001 - loading boundary stores failure on the run
         failed = service.fail_loading(run_id, str(exc))

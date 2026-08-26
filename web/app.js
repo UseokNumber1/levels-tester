@@ -22,6 +22,8 @@ const state = {
   detailBars: [],
   detailLevelLines: [],
   pivotMarkers: null,
+  pricePrecision: 2,
+  tickSize: '0.01',
 };
 const $ = (id) => document.getElementById(id);
 const RIGHT_OFFSET_BARS = 5;
@@ -104,6 +106,12 @@ function formatVolume(vol) {
   return `$${n.toLocaleString()}`;
 }
 
+function fmtPrice(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return n.toFixed(state.pricePrecision);
+}
+
 function isConfirmedLevel(level) {
   return !['created', 'broken', 'expired'].includes(level.state);
 }
@@ -144,6 +152,20 @@ function render(snapshot, deferChart = false) {
   const wasLoading = state.lastStatus === 'loading';
   state.lastStatus = snapshot.status;
 
+  if (snapshot.price_precision != null) state.pricePrecision = snapshot.price_precision;
+  if (snapshot.tick_size) state.tickSize = snapshot.tick_size;
+
+  if (state.candleSeries) {
+    state.candleSeries.applyOptions({
+      priceFormat: { type: 'price', precision: state.pricePrecision, minMove: Number(state.tickSize) },
+    });
+  }
+  if (state.detailSeries) {
+    state.detailSeries.applyOptions({
+      priceFormat: { type: 'price', precision: state.pricePrecision, minMove: Number(state.tickSize) },
+    });
+  }
+
   if (isLoading) {
     $('loading-bar').classList.remove('hidden');
     $('loading-fill').style.width = `${snapshot.progress || 0}%`;
@@ -170,8 +192,8 @@ function render(snapshot, deferChart = false) {
   $('levels').classList.toggle('empty', !confirmedLevels.length);
   $('levels').innerHTML = confirmedLevels.length
     ? confirmedLevels.map(level => `
-    <div class="level"><div class="level-title ${level.side}"><span>${level.side}</span><span>${level.price}</span></div>
-    <div class="level-meta">${level.state} · ${level.touch_count} touches · zone ${level.zone_low}–${level.zone_high}</div></div>`).join('')
+    <div class="level"><div class="level-title ${level.side}"><span>${level.side}</span><span>${fmtPrice(level.price)}</span></div>
+    <div class="level-meta">${level.state} · ${level.touch_count} touches · zone ${fmtPrice(level.zone_low)}–${fmtPrice(level.zone_high)}</div></div>`).join('')
     : 'No levels confirmed yet.';
 
   if (!isLoading && snapshot.master_candles.length > 0 && !deferChart) {
@@ -289,7 +311,7 @@ function renderDetailLevelLines(levels) {
         lineWidth: level.state === 'touched' ? 2 : 1,
         lineStyle: 0,
         axisLabelVisible: true,
-        title: `${level.side[0].toUpperCase()} ${level.price}`,
+        title: `${level.side[0].toUpperCase()} ${fmtPrice(level.price)}`,
       }),
       state.detailSeries.createPriceLine({
         price: Number(level.zone_high),
@@ -515,6 +537,7 @@ function initChart() {
     upColor: '#198754', downColor: '#ee6c4d',
     borderVisible: false,
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
+    priceFormat: { type: 'price', precision: state.pricePrecision, minMove: Number(state.tickSize) },
   });
 }
 
@@ -542,6 +565,7 @@ function initDetailChart() {
     upColor: '#198754', downColor: '#ee6c4d',
     borderVisible: false,
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
+    priceFormat: { type: 'price', precision: state.pricePrecision, minMove: Number(state.tickSize) },
   });
 }
 
