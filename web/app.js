@@ -366,16 +366,6 @@ function hideHint() {
   hint.classList.remove('finish');
 }
 
-function priceRemainsInZone(snapshot, touchEvent) {
-  const level = snapshot.levels.find(item => item.id === touchEvent.level_id);
-  const candle = snapshot.master_candles.find(item =>
-    item.close_time === snapshot.cursor.bar_time
-  );
-  if (!level || !candle) return false;
-  const close = Number(candle.close);
-  return close >= Number(level.zone_low) && close <= Number(level.zone_high);
-}
-
 async function autoPlayStep() {
   if (!state.animRunning || !state.runId) return;
   try {
@@ -388,8 +378,16 @@ async function autoPlayStep() {
         event.event_type === 'level.touched' &&
         snapshot.cursor && event.sequence === snapshot.cursor.sequence
       );
-      if (touchEvent && priceRemainsInZone(snapshot, touchEvent)) {
+      if (touchEvent) {
+        // Pause on any level touch (even if the H1 candle later closes
+        // outside the zone). Detail must start from the touching candle.
+        const touchCandle = snapshot.master_candles.find(item =>
+          item.close_time === snapshot.cursor.bar_time
+        );
         state.detailEnabled = true;
+        state.detailPrevMs = touchCandle
+          ? new Date(touchCandle.open_time).getTime()
+          : new Date(snapshot.cursor.bar_time).getTime();
         openDetailPanel();
         $('detail-status').textContent = 'paused on touch — press Step for M1 replay';
         stopAnimation();

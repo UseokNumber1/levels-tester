@@ -224,10 +224,12 @@ class LevelBook:
             ]
 
         if level.side == LevelSide.RESISTANCE:
-            touched = level.zone_low <= relevant_price <= level.zone_high
+            # A touch is registered only when the wick reaches the level line,
+            # not merely when it enters the surrounding zone band.
+            touched = relevant_price >= level.price
             approaching = level.zone_low - (level.zone_high - level.zone_low) <= relevant_price < level.zone_low
         else:
-            touched = level.zone_low <= relevant_price <= level.zone_high
+            touched = relevant_price <= level.price
             approaching = level.zone_high < relevant_price <= level.zone_high + (level.zone_high - level.zone_low)
 
         if approaching and level.id not in self._approaching:

@@ -126,7 +126,12 @@ class EntryConfirmation:
             ):
                 continue
             relevant_price = candle.high if level.side == LevelSide.RESISTANCE else candle.low
-            if level.zone_low <= relevant_price <= level.zone_high:
+            reached_level = (
+                relevant_price >= level.price
+                if level.side == LevelSide.RESISTANCE
+                else relevant_price <= level.price
+            )
+            if reached_level:
                 setup.touch_time = candle.close_time
                 setup.touch_refined = True
                 return

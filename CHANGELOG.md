@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.5 (2026-08-26)
+
+### Changed
+
+- **Level touch now means reaching the level line, not the zone band**. In `LevelBook.evaluate` (`src/level_tester/domain/search/levels.py`) a `level.touched` event (and the resulting pause) fires only when the candle wick reaches `level.price`; the surrounding zone is no longer treated as a touch. The `level.approaching` hint still uses the zone band
+- Aligned touch-time refinement in `EntryConfirmation._refine_touch` (`src/level_tester/domain/confirmation/service.py`) to the same level-line definition
+
+### Fixed
+
+- **Web replay pause/detail start**: removed the `priceRemainsInZone` guard in `autoPlayStep` (`web/app.js`) so a pause and detail view trigger on any `level.touched`, including H1 candles whose close later leaves the zone. The detail window now starts from the touching candle's `open_time` (`state.detailPrevMs`), so the M1/M5 replay begins exactly at the touch
+
 ## v0.4.4 (2026-08-26)
 
 ### Fixed
