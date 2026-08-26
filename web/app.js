@@ -31,10 +31,12 @@ function scrollChartToRight(chart) {
   const timeScale = chart.timeScale();
   if (typeof timeScale.scrollToPosition === 'function') {
     // Preserve the current zoom and keep the newest bar at the right edge.
-    timeScale.scrollToPosition(RIGHT_OFFSET_BARS, false);
+    timeScale.scrollToPosition(5, false);
+  } else if (typeof timeScale.fitContent === 'function') {
+    // Fallback: fit all data into view so scales and candles are visible.
+    timeScale.fitContent();
   }
 }
-
 function enablePriceAutoScale(series) {
   if (!series) return;
   const priceScale = series.priceScale();
@@ -555,6 +557,20 @@ function openDetailPanel() {
   $('detail-status').textContent = 'synced with H1';
 }
 
+function destroyDetailChart() {
+  if (state.detailChart) {
+    try {
+      if (typeof state.detailChart.remove === 'function') {
+        state.detailChart.remove();
+      }
+    } catch (error) {
+      console.warn('detail chart remove failed:', error);
+    }
+    state.detailChart = null;
+    state.detailSeries = null;
+  }
+}
+
 function resetDetailChart() {
   stopDetailAnimation();
   state.detailActive = false;
@@ -564,7 +580,7 @@ function resetDetailChart() {
   state.detailCount = 0;
   state.detailBars = [];
   clearDetailLevelLines();
-  if (state.detailSeries) state.detailSeries.setData([]);
+  destroyDetailChart();
   const container = $('detail-chart');
   container.classList.add('detail-waiting');
   container.textContent = 'Chart opens on level touch.';
@@ -581,10 +597,8 @@ function clearDetailViewData() {
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
   state.detailBars = [];
-  if (state.detailSeries) {
-    clearDetailLevelLines();
-    state.detailSeries.setData([]);
-  }
+  clearDetailLevelLines();
+  destroyDetailChart();
   $('detail-status').textContent = 'cleared — press Step for M1 replay';
 }
 
@@ -638,7 +652,8 @@ async function animateDetailCandles(candles, startMs, endMs) {
 
   // Draw every new detail candle separately, including on subsequent Step
   // presses. setData() is used with the accumulated data because it is
-  // deterministic in the standalone v5 build; native scrolling keeps zoom.
+  // deterministic in the standalone v5 build; the chart viewport is adjusted
+  // once after the whole batch has been drawn.
   for (let i = 0; i < newBars.length; i++) {
     if (animSeq !== state.detailAnimSeq || !state.detailActive) return;
     const bar = newBars[i];
@@ -653,13 +668,14 @@ async function animateDetailCandles(candles, startMs, endMs) {
     state.detailBars = nextBars;
     state.detailDrawnTime = bar.time;
     state.detailCount += 1;
-    enablePriceAutoScale(state.detailSeries);
-    scrollChartToRight(state.detailChart);
     $('detail-status').textContent = `${state.detailCount} ${detailTf} · ${utcFormat(endMs)} UTC`;
     if (i < newBars.length - 1) {
       await sleep(delay);
     }
   }
+  // Adjust price scale and viewport once after the batch.
+  enablePriceAutoScale(state.detailSeries);
+  scrollChartToRight(state.detailChart);
 }
 
 checkServer();

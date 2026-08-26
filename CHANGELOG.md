@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.4 (2026-08-26)
+
+### Fixed
+
+- **Detail chart on repeated runs**: added `destroyDetailChart()` that fully removes the chart instance (`chart.remove()`) and resets `state.detailChart` / `state.detailSeries`; called from `resetDetailChart()` and `clearDetailViewData()` instead of only clearing the series. This fixes the detail chart rendering without time/price scales and the TV marker after a second "New replay" (H1 kept working because it re-`setData`s every step)
+- **Intermittent detail rendering**: `enablePriceAutoScale()` and `scrollChartToRight()` moved out of the per-candle loop in `animateDetailCandles` and called once after the whole batch, so they no longer race with the chart draw cycle
+- **Viewport fallback**: `scrollChartToRight()` now falls back to `timeScale.fitContent()` when `scrollToPosition` is absent from the published 5.2.1 build
+
 ## v0.4.3 (2026-08-26)
 
 ### Changed
