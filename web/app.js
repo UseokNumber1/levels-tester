@@ -9,6 +9,7 @@ const state = {
   lastStatus: null,
   drawnTime: undefined,
   chartHasData: false,
+  levelLines: [],
 };
 const $ = (id) => document.getElementById(id);
 
@@ -115,8 +116,7 @@ function syncChartToCursor(snapshot) {
       state.chartHasData = false;
     }
     state.drawnTime = undefined;
-    state.levelLines?.forEach(line => state.candleSeries.removePriceLine(line));
-    state.levelLines = [];
+    clearLevelLines();
     if (state.candleSeries.setMarkers) state.candleSeries.setMarkers([]);
     return;
   }
@@ -148,15 +148,7 @@ function syncChartToCursor(snapshot) {
     state.drawnTime = lastTime;
   }
 
-  state.levelLines?.forEach(line => state.candleSeries.removePriceLine(line));
-  state.levelLines = snapshot.levels
-    .filter(isConfirmedLevel)
-    .map(level => state.candleSeries.createPriceLine({
-      price: Number(level.price),
-      color: level.side === 'support' ? '#2166f3' : '#ee6c4d',
-      lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
-      title: `${level.side[0].toUpperCase()} ${level.touch_count}x`,
-    }));
+  renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
 
   if (state.candleSeries.setMarkers) {
     state.candleSeries.setMarkers(snapshot.pivots.map(pivot => ({
@@ -167,6 +159,48 @@ function syncChartToCursor(snapshot) {
       text: pivot.kind,
     })));
   }
+}
+
+function clearLevelLines() {
+  state.levelLines.forEach(line => state.candleSeries.removePriceLine(line));
+  state.levelLines = [];
+}
+
+function renderLevelLines(levels) {
+  clearLevelLines();
+  state.levelLines = levels.flatMap(level => {
+    const isSupport = level.side === 'support';
+    const color = isSupport ? '#2166f3' : '#ee6c4d';
+    const edgeColor = isSupport ? '#8eaff8' : '#f5a18d';
+    const touched = level.state === 'touched';
+    const title = `${level.side[0].toUpperCase()} ${level.state} ${level.touch_count}x`;
+    return [
+      state.candleSeries.createPriceLine({
+        price: Number(level.zone_low),
+        color: edgeColor,
+        lineWidth: 1,
+        lineStyle: 1,
+        axisLabelVisible: false,
+        title: `${level.side} zone low`,
+      }),
+      state.candleSeries.createPriceLine({
+        price: Number(level.price),
+        color,
+        lineWidth: touched ? 2 : 1,
+        lineStyle: touched ? 0 : 2,
+        axisLabelVisible: true,
+        title,
+      }),
+      state.candleSeries.createPriceLine({
+        price: Number(level.zone_high),
+        color: edgeColor,
+        lineWidth: 1,
+        lineStyle: 1,
+        axisLabelVisible: false,
+        title: `${level.side} zone high`,
+      }),
+    ];
+  });
 }
 
 function startAutoPlay() {
@@ -291,6 +325,12 @@ function initChart() {
     borderVisible: false,
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
   });
+  if (window.ResizeObserver) {
+    const resizeObserver = new ResizeObserver(() => {
+      state.chart.resize($('chart').clientWidth, $('chart').clientHeight);
+    });
+    resizeObserver.observe($('chart'));
+  }
 }
 
 async function loadDetail(snapshot) {

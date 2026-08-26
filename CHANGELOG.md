@@ -27,6 +27,26 @@
 - **Next-bar entry boundary**: a candle opening exactly at confirmation close is now recognized as the next entry candle
 - **Late touch refinement**: H1 touch events now retain their source candle window for exact M1/M5 refinement
 
+## v0.3.2 (2026-08-26)
+
+### Added
+- **Symmetric level zones**: zone boundaries now quantized to tick size and centered on median pivot price, ensuring zone_low/zone_high are price-symmetrical
+- **Level state visualization**: central price line reflects level state (confirmed: bold, CREATED: dashed); zone edges use muted edge colors
+- **Level line cleanup on reset**: all price lines and markers cleared on reset, preventing ghost lines
+- **Resize-aware chart**: chart resizes on window dimension changes
+- **Regression tests**: added `tests/test_search_levels.py` covering quantized median clustering and CREATED→CONFIRMED lifecycle
+- **Level confirmation event**: `level.confirmed` emitted when level transitions from CREATED to CONFIRMED
+
+### Changed
+- **Zone recalculation**: `LevelBook.add_pivot` now uses `quantize_tick` for price and computes symmetric zone width from quantized price
+- **Level event semantics**: second pivot on same level returns `created=False`; `level.confirmed` event replaces erroneous duplicate `level.created`
+- **Frontend level rendering**: `renderLevelLines` creates zone edges + central price line per level; `clearLevelLines` removes all before re-render
+
+### Fixed
+- **Level zone symmetry**: zone boundaries now consistently centered on quantized median price after tick rounding
+- **Level state events**: `level.confirmed` emitted only on CREATED→CONFIRMED transition; no duplicate emission on subsequent pivots
+- **Ruff style fixes**: resolved 3 FURB157 warnings in test fixtures
+
 ## v0.3.0 (2026-08-26)
 
 ### Added

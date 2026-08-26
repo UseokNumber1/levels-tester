@@ -8,7 +8,7 @@ from level_tester.domain.configuration import StrategyConfig
 from level_tester.domain.confirmation import EntryConfirmation
 from level_tester.domain.evaluation import OutcomeEvaluator
 from level_tester.domain.execution import TradeExecution
-from level_tester.domain.models import Candle, LevelEvent, Pivot, as_json
+from level_tester.domain.models import Candle, LevelEvent, LevelState, Pivot, as_json
 from level_tester.domain.search import CausalPivotDetector, LevelBook
 
 
@@ -185,6 +185,7 @@ class ReplayEngine:
         emitted: list[LevelEvent] = []
         for pivot in new_pivots:
             self._pivots.append(pivot)
+            previous_states = {item.id: item.state for item in self._levels.levels}
             level, created = self._levels.add_pivot(pivot)
             emitted.append(
                 self._event(
@@ -206,6 +207,21 @@ class ReplayEngine:
                         sequence,
                         pivot.confirmed_time,
                         "level.created",
+                        level.id,
+                        {
+                            "side": level.side.value,
+                            "price": str(level.price),
+                            "zone_low": str(level.zone_low),
+                            "zone_high": str(level.zone_high),
+                        },
+                    )
+                )
+            if previous_states.get(level.id) == LevelState.CREATED and level.state == LevelState.CONFIRMED:
+                emitted.append(
+                    self._event(
+                        sequence,
+                        pivot.confirmed_time,
+                        "level.confirmed",
                         level.id,
                         {
                             "side": level.side.value,

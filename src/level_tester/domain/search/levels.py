@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from statistics import median
 from uuid import NAMESPACE_URL, uuid5
 
 from level_tester.domain.models import Candle, Level, LevelEvent, LevelSide, LevelState, Pivot
@@ -61,20 +60,20 @@ class LevelBook:
             level.touch_count += 1
             level.last_touch_time = pivot.confirmed_time
             self._recalculate_zone(level)
-            is_new = level.state == LevelState.CREATED
             if level.state == LevelState.CREATED and level.touch_count >= self.config.min_touches:
                 level.state = LevelState.CONFIRMED
                 level.confirmed_time = pivot.confirmed_time
-            return level, is_new
+            return level, False
 
-        width = max(pivot.price * self.config.zone_percent, self.config.tick_size)
+        price = quantize_tick(pivot.price, self.config.tick_size)
+        width = max(price * self.config.zone_percent, self.config.tick_size)
         initial_state = LevelState.CONFIRMED if self.config.min_touches <= 1 else LevelState.CREATED
         level = Level(
             id=str(uuid5(NAMESPACE_URL, f"{self.run_id}:{pivot.id}")),
             side=side,
-            price=quantize_tick(pivot.price, self.config.tick_size),
-            zone_low=pivot.price - width,
-            zone_high=pivot.price + width,
+            price=price,
+            zone_low=price - width,
+            zone_high=price + width,
             created_time=pivot.confirmed_time,
             confirmed_time=pivot.confirmed_time,
             source_pivot_ids=[pivot.id],
@@ -146,7 +145,13 @@ class LevelBook:
                         pivot_prices.append(c.low)
         if not pivot_prices:
             return
-        med = Decimal(str(median([float(p) for p in pivot_prices])))
+        ordered = sorted(pivot_prices)
+        middle = len(ordered) // 2
+        med = (
+            ordered[middle]
+            if len(ordered) % 2
+            else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+        )
         level.price = quantize_tick(med, self.config.tick_size)
         width = max(level.price * self.config.zone_percent, self.config.tick_size)
         level.zone_low = level.price - width
