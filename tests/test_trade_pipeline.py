@@ -105,3 +105,185 @@ def test_confirmation_refines_touch_from_h1_bar_to_detail_candle() -> None:
     assert setups[0].touch_refined is True
     assert setups[0].touch_time == detail[0].close_time
     assert setups[0].status == TradeSetupStatus.ENTRY_CONFIRMED
+
+
+def test_bounce_requires_consecutive_closes_strictly_above_support() -> None:
+    level = Level(
+        id="support-bounce",
+        side=LevelSide.SUPPORT,
+        price=Decimal(100),
+        zone_low=Decimal(99),
+        zone_high=Decimal(101),
+        created_time=datetime(2026, 1, 1, tzinfo=UTC),
+        confirmed_time=datetime(2026, 1, 1, tzinfo=UTC),
+        state=LevelState.TOUCHED,
+    )
+    touch = LevelEvent(
+        run_id="run-bounce",
+        sequence=1,
+        event_time=datetime(2026, 1, 1, tzinfo=UTC),
+        event_type="level.touched",
+        level_id=level.id,
+        reason="wick reached support",
+    )
+    candles = [
+        _candle(1, "100", "99", "98", "101"),
+        _candle(2, "99", "100", "98.5", "100.5"),
+        _candle(3, "100", "101", "99.8", "101.5"),
+    ]
+    confirmation = EntryConfirmation(
+        "run-bounce", ConfirmationConfig(timeframe="5m", required_bars=2, max_wait_bars=5)
+    )
+
+    setups = confirmation.evaluate(candles, [level], [touch], 1)
+
+    assert setups[0].status == TradeSetupStatus.WAITING_CONFIRMATION
+    assert setups[0].confirmation_bars == 1
+    assert setups[0].bars_waited == 3
+
+    next_candle = _candle(4, "101", "102", "100.8", "102.5")
+    confirmation.evaluate([next_candle], [level], [], 2)
+
+    assert setups[0].status == TradeSetupStatus.ENTRY_CONFIRMED
+    assert setups[0].confirmed_time == next_candle.close_time
+    assert setups[0].entry_time is None
+
+
+def test_bounce_works_mirrored_for_short_resistance() -> None:
+    level = Level(
+        id="resistance-bounce",
+        side=LevelSide.RESISTANCE,
+        price=Decimal(100),
+        zone_low=Decimal(99),
+        zone_high=Decimal(101),
+        created_time=datetime(2026, 1, 1, tzinfo=UTC),
+        confirmed_time=datetime(2026, 1, 1, tzinfo=UTC),
+        state=LevelState.TOUCHED,
+    )
+    touch = LevelEvent(
+        run_id="run-short-bounce",
+        sequence=1,
+        event_time=datetime(2026, 1, 1, tzinfo=UTC),
+        event_type="level.touched",
+        level_id=level.id,
+        reason="wick reached resistance",
+    )
+    candles = [
+        _candle(1, "100", "99", "98.5", "101"),
+        _candle(2, "99", "98", "97.5", "100"),
+        _candle(3, "98", "97", "96.5", "99"),
+    ]
+    confirmation = EntryConfirmation(
+        "run-short-bounce", ConfirmationConfig(timeframe="5m", required_bars=2, max_wait_bars=5)
+    )
+
+    setups = confirmation.evaluate(candles, [level], [touch], 1)
+
+    assert setups[0].status == TradeSetupStatus.ENTRY_CONFIRMED
+    assert setups[0].confirmed_time == candles[1].close_time
+
+
+def test_confirmation_timeout_cancels_setup_without_creating_trade() -> None:
+    level = Level(
+        id="support-timeout",
+        side=LevelSide.SUPPORT,
+        price=Decimal(100),
+        zone_low=Decimal(99),
+        zone_high=Decimal(101),
+        created_time=datetime(2026, 1, 1, tzinfo=UTC),
+        confirmed_time=datetime(2026, 1, 1, tzinfo=UTC),
+        state=LevelState.TOUCHED,
+    )
+    touch = LevelEvent(
+        run_id="run-timeout",
+        sequence=1,
+        event_time=datetime(2026, 1, 1, tzinfo=UTC),
+        event_type="level.touched",
+        level_id=level.id,
+        reason="wick reached support",
+    )
+    candles = [
+        _candle(1, "100", "99", "98", "100.5"),
+        _candle(2, "99", "100", "98.5", "100.5"),
+    ]
+    confirmation = EntryConfirmation(
+        "run-timeout", ConfirmationConfig(timeframe="5m", required_bars=2, max_wait_bars=2)
+    )
+
+    setups = confirmation.evaluate(candles, [level], [touch], 1)
+
+    assert setups[0].status == TradeSetupStatus.CANCELLED
+    assert setups[0].cancelled_time == candles[-1].close_time
+    assert setups[0].entry_time is None
+
+
+def test_touch_confirmation_enters_on_next_detail_bar() -> None:
+    level = Level(
+        id="support-touch",
+        side=LevelSide.SUPPORT,
+        price=Decimal(100),
+        zone_low=Decimal(99),
+        zone_high=Decimal(101),
+        created_time=datetime(2026, 1, 1, tzinfo=UTC),
+        confirmed_time=datetime(2026, 1, 1, tzinfo=UTC),
+        state=LevelState.TOUCHED,
+    )
+    touch = LevelEvent(
+        run_id="run-touch",
+        sequence=1,
+        event_time=datetime(2026, 1, 1, tzinfo=UTC),
+        event_type="level.touched",
+        level_id=level.id,
+        reason="wick reached support",
+    )
+    candle = _candle(1, "100", "101", "99", "101")
+    confirmation = EntryConfirmation(
+        "run-touch", ConfirmationConfig(method="touch", timeframe="5m")
+    )
+
+    setups = confirmation.evaluate([candle], [level], [touch], 1)
+
+    assert setups[0].confirmation_method == "touch"
+    assert setups[0].status == TradeSetupStatus.ENTRY_CONFIRMED
+    assert setups[0].confirmed_time == touch.event_time
+    assert setups[0].entry_time == candle.open_time
+    assert setups[0].entry_price == candle.open
+
+
+def test_consecutive_method_does_not_require_bullish_candle_body() -> None:
+    level = Level(
+        id="support-consecutive",
+        side=LevelSide.SUPPORT,
+        price=Decimal(100),
+        zone_low=Decimal(99),
+        zone_high=Decimal(101),
+        created_time=datetime(2026, 1, 1, tzinfo=UTC),
+        confirmed_time=datetime(2026, 1, 1, tzinfo=UTC),
+        state=LevelState.TOUCHED,
+    )
+    touch = LevelEvent(
+        run_id="run-consecutive",
+        sequence=1,
+        event_time=datetime(2026, 1, 1, tzinfo=UTC),
+        event_type="level.touched",
+        level_id=level.id,
+        reason="wick reached support",
+    )
+    candles = [
+        _candle(1, "102", "101", "100", "103"),
+        _candle(2, "101", "102", "100.5", "103"),
+    ]
+
+    consecutive = EntryConfirmation(
+        "run-consecutive", ConfirmationConfig(method="consecutive", required_bars=2)
+    )
+    bounce = EntryConfirmation(
+        "run-bounce-body", ConfirmationConfig(method="bounce", required_bars=2)
+    )
+
+    consecutive_setup = consecutive.evaluate(candles, [level], [touch], 1)[0]
+    bounce_setup = bounce.evaluate(candles, [level], [touch], 1)[0]
+
+    assert consecutive_setup.status == TradeSetupStatus.ENTRY_CONFIRMED
+    assert bounce_setup.status == TradeSetupStatus.WAITING_CONFIRMATION
+    assert consecutive_setup.id != bounce_setup.id

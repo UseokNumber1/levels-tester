@@ -21,6 +21,8 @@ const state = {
   detailCount: 0,
   detailBars: [],
   detailLevelLines: [],
+  detailSetupMarkers: null,
+  activeSetupId: null,
   pivotMarkers: null,
   pricePrecision: 2,
   tickSize: '0.01',
@@ -28,8 +30,17 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const RIGHT_OFFSET_BARS = 5;
 
-function scrollChartToRight(chart) {
-  if (!chart) return;
+function selectedConfirmationMethods() {
+  const checked = document.querySelector('input[name="confirmation-method"]:checked');
+  return checked ? [checked.value] : [];
+}
+
+function stepDelay() {
+  const speed = Number($('speed').value) || 1;
+  return Math.max(8, Math.round(1000 / speed));
+}
+
+function scrollChartToRight(chart) {  if (!chart) return;
   const timeScale = chart.timeScale();
   if (typeof timeScale.scrollToPosition === 'function') {
     // Preserve the current zoom and keep the newest bar at the right edge.
@@ -147,6 +158,7 @@ function render(snapshot, deferChart = false) {
   state.runId = snapshot.run_id;
   if (Number.isFinite(Number(snapshot.speed))) {
     $('speed').value = String(snapshot.speed);
+    $('speed-value').textContent = `${snapshot.speed}×`;
   }
   const isLoading = snapshot.status === 'loading';
   const wasLoading = state.lastStatus === 'loading';
@@ -325,6 +337,135 @@ function renderDetailLevelLines(levels) {
   });
 }
 
+function findActiveSetup(snapshot) {
+  const setups = snapshot.setups || [];
+  if (state.activeSetupId) {
+    const anchored = setups.find(setup => setup.id === state.activeSetupId);
+    if (anchored) return anchored;
+  }
+  const cursorMs = snapshot.cursor ? new Date(snapshot.cursor.bar_time).getTime() : Date.now();
+  const candidates = setups.filter(setup => new Date(setup.touch_time).getTime() <= cursorMs);
+  if (!candidates.length) return null;
+  candidates.sort(
+    (a, b) => new Date(b.touch_time).getTime() - new Date(a.touch_time).getTime()
+  );
+  return candidates[0];
+}
+
+function barConfirms(bar, side, method, levelPrice) {
+  const close = Number(bar.close);
+  const open = Number(bar.open);
+  const price = Number(levelPrice);
+  if (side === 'support') {
+    const inDirection = close > price;
+    if (method === 'bounce') return close > open && inDirection;
+    return inDirection;
+  }
+  const inDirection = close < price;
+  if (method === 'bounce') return close < open && inDirection;
+  return inDirection;
+}
+
+function drawSetupMarkers(setup, snapshot, bars) {
+  if (!state.detailSetupMarkers) return;
+  if (!setup) {
+    state.detailSetupMarkers.setMarkers([]);
+    return;
+  }
+  const touchMs = new Date(setup.touch_time).getTime();
+  const touchBar = bars.find(bar => bar.time * 1000 >= touchMs) || bars[0];
+  if (!touchBar) {
+    state.detailSetupMarkers.setMarkers([]);
+    return;
+  }
+  const side = setup.side;
+  const method = setup.confirmation_method;
+  const level = (snapshot.levels || []).find(item => item.id === setup.level_id);
+  const levelPrice = level ? level.price : null;
+  const requiredBars = Number($('confirmation-bars').value) || 2;
+  const below = side === 'support' ? 'belowBar' : 'aboveBar';
+  const above = side === 'support' ? 'aboveBar' : 'belowBar';
+  const markers = [{ time: touchBar.time, position: below, color: '#888', shape: 'circle', text: 'T' }];
+
+  if (method === 'touch') {
+    const entryMs = new Date(setup.entry_time || setup.touch_time).getTime();
+    const entryBar = bars.find(bar => bar.time * 1000 >= entryMs) || touchBar;
+    markers.push({ time: entryBar.time, position: below, color: '#198754', shape: 'arrowUp', text: 'ENTRY' });
+    state.detailSetupMarkers.setMarkers(markers);
+    return;
+  }
+
+  let count = 0;
+  for (const bar of bars) {
+    if (bar.time * 1000 <= touchBar.time * 1000) continue;
+    if (levelPrice == null) break;
+    if (barConfirms(bar, side, method, levelPrice)) {
+      count += 1;
+      markers.push({ time: bar.time, position: below, color: '#198754', shape: 'circle', text: String(count) });
+    } else {
+      count = 0;
+    }
+  }
+
+  if (setup.entry_time) {
+    const entryMs = new Date(setup.entry_time).getTime();
+    const entryBar = bars.find(bar => bar.time * 1000 >= entryMs) || touchBar;
+    markers.push({ time: entryBar.time, position: below, color: '#198754', shape: 'arrowUp', text: 'ENTRY' });
+  } else if (setup.cancelled_time || setup.status === 'cancelled' || setup.status === 'expired') {
+    const cancelMs = new Date(setup.cancelled_time || setup.touch_time).getTime();
+    const cancelBar = bars.find(bar => bar.time * 1000 >= cancelMs) || touchBar;
+    markers.push({ time: cancelBar.time, position: above, color: '#ee6c4d', shape: 'arrowDown', text: 'CANCEL' });
+  }
+  state.detailSetupMarkers.setMarkers(markers);
+}
+
+function setupDetailStatus(setup, detailTf) {
+  if (!setup) return '';
+  const method = setup.confirmation_method;
+  if (setup.entry_time) return `${detailTf} · ${method} ENTRY @ ${utcFormat(new Date(setup.entry_time).getTime())} UTC`;
+  if (setup.cancelled_time || setup.status === 'cancelled' || setup.status === 'expired') {
+    return `${detailTf} · ${method} CANCELLED (${setup.reason || ''})`;
+  }
+  const required = Number($('confirmation-bars').value) || 2;
+  return `${detailTf} · ${method} confirm ${setup.confirmation_bars || 0}/${required} (waited ${setup.bars_waited || 0})`;
+}
+
+function showResolution(setup, snapshot) {
+  const detailTf = $('detail-tf').value.toUpperCase();
+  const method = setup.confirmation_method;
+  const required = Number($('confirmation-bars').value) || 2;
+  const entryTime = setup.entry_time
+    ? utcFormat(new Date(setup.entry_time).getTime()) + ' UTC'
+    : '';
+  let msg;
+  if (setup.entry_time) {
+    if (method === 'touch') {
+      msg = `Method 1 (touch): entry at ${entryTime}`;
+    } else if (method === 'consecutive') {
+      msg = `Method 3: ${required} consecutive closes beyond the level → ENTRY @ ${entryTime}`;
+    } else {
+      msg = `Method 5: ${required} directional candles past the level → ENTRY @ ${entryTime}`;
+    }
+    showHint(msg, true);
+  } else {
+    let detail;
+    if (setup.reason && setup.reason.includes('timeout')) {
+      detail = `exceeded max wait (${setup.bars_waited} bars)`;
+    } else {
+      detail = setup.reason || 'cancelled';
+    }
+    if (method === 'touch') {
+      msg = `Method 1: setup cancelled (${detail})`;
+    } else if (method === 'consecutive') {
+      msg = `Method 3: not enough consecutive closes — ${detail}`;
+    } else {
+      msg = `Method 5: no ${required} directional candles past the level — ${detail}`;
+    }
+    showHint(msg, false);
+  }
+  $('detail-status').textContent = msg;
+}
+
 function renderLevelLines(levels) {
   clearLevelLines();
   state.levelLines = levels.flatMap(level => {
@@ -393,27 +534,25 @@ async function autoPlayStep() {
   try {
     const snapshot = await request(`/api/runs/${state.runId}/step`, { method: 'POST' });
     render(snapshot);
-    const beforeDisplay = snapshot.cursor && state.displayFromMs
-      && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
-    if (!beforeDisplay) {
-      const touchEvent = snapshot.events.find(event =>
-        event.event_type === 'level.touched' &&
-        snapshot.cursor && event.sequence === snapshot.cursor.sequence
-      );
-      if (touchEvent) {
-        // Pause on any level touch (even if the H1 candle later closes
-        // outside the zone). Detail must start from the touching candle.
-        const touchCandle = snapshot.master_candles.find(item =>
-          item.close_time === snapshot.cursor.bar_time
-        );
+    if (state.detailEnabled) {
+      await syncDetail(snapshot);
+    }
+    const touchEvent = snapshot.events.find(event =>
+      event.event_type === 'level.touched' &&
+      snapshot.cursor && event.sequence === snapshot.cursor.sequence
+    );
+    if (touchEvent) {
+      const level = (snapshot.levels || []).find(item => item.id === touchEvent.level_id);
+      const active = level && !['pending_rebound', 'broken', 'expired'].includes(level.state);
+      if (active) {
+        const touchCandle = snapshot.master_candles.find(item => item.close_time === snapshot.cursor.bar_time);
         state.detailEnabled = true;
         state.detailPrevMs = touchCandle
           ? new Date(touchCandle.open_time).getTime()
           : new Date(snapshot.cursor.bar_time).getTime();
         openDetailPanel();
-        $('detail-status').textContent = 'paused on touch — press Step for M1 replay';
+        showHint('⏸ Пауза — активный уровень затронут, нажмите Play или Step для продолжения');
         stopAnimation();
-        showHint('⏸ Пауза — уровень затронут, нажмите Play или Step для продолжения');
         return;
       }
     }
@@ -427,8 +566,9 @@ async function autoPlayStep() {
       return;
     }
     if (!state.animRunning) return;
-    const delay = beforeDisplay ? 0 : Math.max(50, Math.round(1000 / (Number($('speed').value) || 1)));
-    state.animTimer = setTimeout(autoPlayStep, delay);
+    const beforeDisplay = snapshot.cursor && state.displayFromMs
+      && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
+    state.animTimer = setTimeout(autoPlayStep, beforeDisplay ? 0 : stepDelay());
   } catch (error) {
     stopAnimation();
   }
@@ -446,7 +586,6 @@ async function command(name) {
   try {
     if (name === 'play') {
       hideHint();
-      if (state.detailEnabled) clearDetailViewData();
       startAutoPlay();
       return;
     }
@@ -467,6 +606,10 @@ async function command(name) {
       // included), so there is no reason to gate it on display_from.
       await syncDetail(snapshot);
     }
+    const resolvedSetup = (snapshot.setups || []).find(
+      s => s.status === 'entry_confirmed' || s.status === 'cancelled' || s.status === 'expired'
+    );
+    if (resolvedSetup) showResolution(resolvedSetup, snapshot);
     drawH1Chart(snapshot);
     if (name === 'reset') resetDetailChart();
   } catch (error) { alert(error.message); }
@@ -482,6 +625,10 @@ $('create').onclick = async () => {
   resetDetailChart();
   hideHint();
   try {
+    const confirmationMethods = selectedConfirmationMethods();
+    if (!confirmationMethods.length) {
+      throw new Error('Select at least one confirmation method.');
+    }
     const dateStr = $('display-from').value + 'T00:00:00Z';
     state.displayFromMs = Date.parse(dateStr);
     const snapshot = await request('/api/runs', {
@@ -490,6 +637,9 @@ $('create').onclick = async () => {
         symbol: $('symbol').value,
         display_from: dateStr,
         detail_timeframe: selectedDetailTf(),
+        confirmation_methods: confirmationMethods,
+        confirmation_required_bars: Number($('confirmation-bars').value),
+        confirmation_max_wait_bars: Number($('confirmation-max-wait').value),
       }),
     });
     render(snapshot);
@@ -501,7 +651,11 @@ document.querySelectorAll('[data-command]').forEach(button => {
   button.onclick = () => command(button.dataset.command);
 });
 
+$('speed').oninput = () => {
+  $('speed-value').textContent = `${$('speed').value}×`;
+};
 $('speed').onchange = async () => {
+  $('speed-value').textContent = `${$('speed').value}×`;
   if (state.runId) {
     const snapshot = await request(`/api/runs/${state.runId}/speed`, {
       method: 'PATCH',
@@ -567,6 +721,7 @@ function initDetailChart() {
     wickUpColor: '#198754', wickDownColor: '#ee6c4d',
     priceFormat: { type: 'price', precision: state.pricePrecision, minMove: Number(state.tickSize) },
   });
+  state.detailSetupMarkers = LightweightCharts.createSeriesMarkers(state.detailSeries, []);
 }
 
 function openDetailPanel() {
@@ -601,6 +756,7 @@ function resetDetailChart() {
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
   state.detailBars = [];
+  state.activeSetupId = null;
   clearDetailLevelLines();
   destroyDetailChart();
   const container = $('detail-chart');
@@ -619,6 +775,7 @@ function clearDetailViewData() {
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
   state.detailBars = [];
+  state.activeSetupId = null;
   clearDetailLevelLines();
   destroyDetailChart();
   $('detail-status').textContent = 'cleared — press Step for M1 replay';
@@ -631,6 +788,8 @@ async function syncDetail(snapshot) {
   openDetailPanel();
   const startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
   if (cursorMs <= startMs) return;
+  const activeSetup = findActiveSetup(snapshot);
+  if (activeSetup) state.activeSetupId = activeSetup.id;
   try {
     const params = new URLSearchParams({
       start: new Date(startMs).toISOString(),
@@ -640,14 +799,14 @@ async function syncDetail(snapshot) {
     // Advance the window before animating so an interrupted animation
     // never refetches or re-draws the same hour on the next Step.
     state.detailPrevMs = cursorMs;
-    await animateDetailCandles(data.detail_candles || [], startMs, cursorMs);
+    await animateDetailCandles(data.detail_candles || [], startMs, cursorMs, activeSetup, snapshot);
   } catch (error) {
     console.error('detail load failed:', error);
     $('detail-status').textContent = `detail error: ${error && error.message ? error.message : 'unavailable'}`;
   }
 }
 
-async function animateDetailCandles(candles, startMs, endMs) {
+async function animateDetailCandles(candles, startMs, endMs, activeSetup, snapshot) {
   stopDetailAnimation();
   initDetailChart();
   if (!state.detailSeries) return;
@@ -667,7 +826,10 @@ async function animateDetailCandles(candles, startMs, endMs) {
   let lastTime = typeof state.detailDrawnTime === 'number' ? state.detailDrawnTime : undefined;
   const newBars = bars.filter(bar => lastTime === undefined || bar.time > lastTime);
   $('detail-status').textContent = `${state.detailCount}/${state.detailCount + newBars.length} ${detailTf} · ${utcFormat(endMs)} UTC`;
-  if (!newBars.length) return;
+  if (!newBars.length) {
+    drawSetupMarkers(activeSetup, snapshot, state.detailBars);
+    return;
+  }
   const delay = Math.max(30, Math.round(1000 / (Number($('speed').value) || 1)));
   const initialLoad = state.detailDrawnTime === undefined;
   if (initialLoad) state.detailBars = [];
@@ -698,6 +860,9 @@ async function animateDetailCandles(candles, startMs, endMs) {
   // Adjust price scale and viewport once after the batch.
   enablePriceAutoScale(state.detailSeries);
   scrollChartToRight(state.detailChart);
+  drawSetupMarkers(activeSetup, snapshot, state.detailBars);
+  const status = setupDetailStatus(activeSetup, detailTf);
+  if (status) $('detail-status').textContent = status;
 }
 
 checkServer();

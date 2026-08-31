@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from level_tester.domain.confirmation import ConfirmationConfig
+from level_tester.domain.confirmation import (
+    SUPPORTED_CONFIRMATION_METHODS,
+    ConfirmationConfig,
+)
 from level_tester.domain.evaluation import OutcomeProfile
 from level_tester.domain.execution import ExecutionConfig
 from level_tester.domain.search import LevelConfig, PivotDetectorConfig
@@ -36,6 +39,7 @@ class StrategyConfig:
     detail_timeframe: str = "1m"
     outcome_profiles: tuple[OutcomeProfile, ...] = ()
     confirmation: ConfirmationConfig = field(default_factory=ConfirmationConfig)
+    confirmation_methods: tuple[str, ...] = ("bounce",)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     market: MarketConfig = field(default_factory=MarketConfig)
 
@@ -46,3 +50,12 @@ class StrategyConfig:
             raise ValueError("detail_timeframes must contain 1m or 5m")
         if self.detail_timeframe not in self.detail_timeframes:
             raise ValueError("detail_timeframe must be 1m or 5m")
+        if (
+            not self.confirmation_methods
+            or len(set(self.confirmation_methods)) != len(self.confirmation_methods)
+            or not set(self.confirmation_methods) <= set(SUPPORTED_CONFIRMATION_METHODS)
+        ):
+            raise ValueError(
+                "confirmation_methods must contain unique supported methods: "
+                + ", ".join(SUPPORTED_CONFIRMATION_METHODS)
+            )

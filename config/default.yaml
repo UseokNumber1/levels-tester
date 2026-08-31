@@ -8,7 +8,7 @@ replay:
   detail_timeframes:
     - 1m
     - 5m
-  default_speed: 10.0
+  default_speed: 1.0
   only_closed_candles: true
   intrabar_policy: m5_exact
   checkpoint_every_bars: 50
@@ -16,7 +16,7 @@ replay:
 algorithm:
   version: "1.0.0"
   pivot:
-    wing: 6
+    wing: 8
     equal_extrema: first
     min_volume_ratio: 0.5
   level:
@@ -27,6 +27,9 @@ algorithm:
     max_lifetime_bars: null
     tick_size: 0.01
   confirmation:
+    method: bounce
+    methods:
+      - bounce
     timeframe: 1m
     required_bars: 2
     max_wait_bars: 15
@@ -36,6 +39,31 @@ algorithm:
     risk_reward: 2
     fee_percent: 0
     slippage_percent: 0
+    variants:
+      - id: sl_02_rr_2
+        name: SL 0.2% / RR 2
+        stop:
+          type: percent_from_entry
+          value: 0.2
+        take:
+          type: risk_reward
+          value: 2
+      - id: sl_03_rr_2
+        name: SL 0.3% / RR 2
+        stop:
+          type: percent_from_entry
+          value: 0.3
+        take:
+          type: risk_reward
+          value: 2
+      - id: sl_05_tp_1
+        name: SL 0.5% / TP 1%
+        stop:
+          type: percent_from_entry
+          value: 0.5
+        take:
+          type: percent_from_entry
+          value: 1.0
   outcomes:
     - name: quick_rebound
       wait_bars: 3

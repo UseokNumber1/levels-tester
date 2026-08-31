@@ -31,6 +31,7 @@ class LevelSide(StrEnum):
 
 
 class LevelState(StrEnum):
+    PENDING_REBOUND = "pending_rebound"
     CREATED = "created"
     CONFIRMED = "confirmed"
     WAITING_TOUCH = "waiting_touch"

@@ -29,6 +29,9 @@ class Run:
     error_message: str | None = None
     instrument_id: int | None = None
     detail_timeframe: str = "1m"
+    confirmation_methods: tuple[str, ...] = ("bounce",)
+    confirmation_required_bars: int = 2
+    confirmation_max_wait_bars: int = 15
     tick_size: Decimal | None = None
     price_precision: int | None = None
 
@@ -46,6 +49,9 @@ class RunService:
         calculation_from: datetime,
         effective_to: datetime,
         detail_timeframe: str = "1m",
+        confirmation_methods: tuple[str, ...] = ("bounce",),
+        confirmation_required_bars: int | None = None,
+        confirmation_max_wait_bars: int | None = None,
     ) -> Run:
         _validate_symbol(symbol)
         window = ReplayWindow(display_from, effective_to, calculation_from)
@@ -56,6 +62,21 @@ class RunService:
             effective_to=window.effective_to,
             window=window,
             detail_timeframe=detail_timeframe,
+            confirmation_methods=confirmation_methods,
+            confirmation_required_bars=(
+                confirmation_required_bars
+                if confirmation_required_bars is not None
+                else self.default_config.confirmation.required_bars
+                if self.default_config
+                else 2
+            ),
+            confirmation_max_wait_bars=(
+                confirmation_max_wait_bars
+                if confirmation_max_wait_bars is not None
+                else self.default_config.confirmation.max_wait_bars
+                if self.default_config
+                else 15
+            ),
             speed=self.default_config.default_speed if self.default_config else 1.0,
         )
         with self._lock:
@@ -161,6 +182,9 @@ class RunService:
             {
                 "symbol": run.symbol,
                 "speed": run.speed,
+                "confirmation_methods": list(run.confirmation_methods),
+                "confirmation_required_bars": run.confirmation_required_bars,
+                "confirmation_max_wait_bars": run.confirmation_max_wait_bars,
                 "config_hash": run.config_hash,
                 "data_set_id": run.data_set_id,
                 "progress": run.progress,
@@ -208,6 +232,9 @@ def _loading_snapshot(run: Run) -> dict:
         "detail_candles": [],
         "events": [],
         "speed": run.speed,
+        "confirmation_methods": list(run.confirmation_methods),
+        "confirmation_required_bars": run.confirmation_required_bars,
+        "confirmation_max_wait_bars": run.confirmation_max_wait_bars,
         "config_hash": run.config_hash,
         "data_set_id": run.data_set_id,
         "window": _window_json(run.window),

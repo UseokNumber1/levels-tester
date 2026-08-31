@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import pairwise
@@ -121,7 +121,12 @@ class ReplayEngine:
         self._detector = CausalPivotDetector(self.config.pivot)
         self._levels = LevelBook(self.run_id, self.config.level)
         self._levels.set_candles(list(self._master_candles))
-        self._confirmation = EntryConfirmation(self.run_id, self.config.confirmation)
+        self._confirmations = {
+            method: EntryConfirmation(
+                self.run_id, replace(self.config.confirmation, method=method)
+            )
+            for method in self.config.confirmation_methods
+        }
         self._execution = TradeExecution(self.run_id, self.config.execution)
         self._outcomes = OutcomeEvaluator(self.run_id, self.config.outcome_profiles)
         self._pivots: list[Pivot] = []
@@ -187,12 +192,13 @@ class ReplayEngine:
             self._pivots.append(pivot)
             previous_states = {item.id: item.state for item in self._levels.levels}
             level, created = self._levels.add_pivot(pivot)
+            level_id = level.id if level is not None else pivot.id
             emitted.append(
                 self._event(
                     sequence,
                     pivot.confirmed_time,
                     "pivot.confirmed",
-                    level.id,
+                    level_id,
                     {
                         "pivot_id": pivot.id,
                         "kind": pivot.kind.value,
@@ -201,7 +207,7 @@ class ReplayEngine:
                     },
                 )
             )
-            if created:
+            if created and level is not None:
                 emitted.append(
                     self._event(
                         sequence,
@@ -209,6 +215,7 @@ class ReplayEngine:
                         "level.created",
                         level.id,
                         {
+                            "state": level.state.value,
                             "side": level.side.value,
                             "price": str(level.price),
                             "zone_low": str(level.zone_low),
@@ -216,7 +223,11 @@ class ReplayEngine:
                         },
                     )
                 )
-            if previous_states.get(level.id) == LevelState.CREATED and level.state == LevelState.CONFIRMED:
+            if (
+                level is not None
+                and previous_states.get(level.id) == LevelState.CREATED
+                and level.state == LevelState.CONFIRMED
+            ):
                 emitted.append(
                     self._event(
                         sequence,
@@ -253,16 +264,40 @@ class ReplayEngine:
         events: list[LevelEvent],
         sequence: int,
     ) -> list[LevelEvent]:
-        setup_statuses = {setup.id: setup.status for setup in self._confirmation.setups}
+        setups = [
+            setup
+            for confirmation in self._confirmations.values()
+            for setup in confirmation.setups
+        ]
+        setup_statuses = {setup.id: setup.status for setup in setups}
         trade_statuses = {trade.id: trade.status for trade in self._execution.trades}
-        self._confirmation.evaluate(
-            detail_candles, self._levels.levels, events, sequence
-        )
+        for confirmation in self._confirmations.values():
+            confirmation.evaluate(detail_candles, self._levels.levels, events, sequence)
+        setups = [
+            setup
+            for confirmation in self._confirmations.values()
+            for setup in confirmation.setups
+        ]
         self._execution.evaluate(
-            self._confirmation.setups, self._levels.levels, detail_candles
+            setups, self._levels.levels, detail_candles
         )
         emitted: list[LevelEvent] = []
-        for setup in self._confirmation.setups:
+        for setup in setups:
+            if setup.id not in setup_statuses:
+                emitted.append(
+                    self._event(
+                        sequence,
+                        setup.touch_time,
+                        "setup.created",
+                        setup.level_id,
+                        {
+                            "setup_id": setup.id,
+                            "side": setup.side.value,
+                            "confirmation_method": setup.confirmation_method,
+                            "touch_time": setup.touch_time,
+                        },
+                    )
+                )
             if (
                 setup.status.value == "entry_confirmed"
                 and setup_statuses.get(setup.id) != setup.status
@@ -273,7 +308,29 @@ class ReplayEngine:
                         setup.confirmed_time or setup.touch_time,
                         "entry.confirmed",
                         setup.level_id,
-                        {"setup_id": setup.id, "entry_time": setup.entry_time},
+                        {
+                            "setup_id": setup.id,
+                            "entry_time": setup.entry_time,
+                            "confirmation_method": setup.confirmation_method,
+                        },
+                    )
+                )
+            if (
+                setup.status.value in {"cancelled", "expired"}
+                and setup_statuses.get(setup.id) != setup.status
+            ):
+                emitted.append(
+                    self._event(
+                        sequence,
+                        setup.cancelled_time or setup.touch_time,
+                        f"setup.{setup.status.value}",
+                        setup.level_id,
+                        {
+                            "setup_id": setup.id,
+                            "confirmation_method": setup.confirmation_method,
+                            "reason": setup.reason,
+                            "bars_waited": setup.bars_waited,
+                        },
                     )
                 )
         for trade in self._execution.trades:
@@ -286,6 +343,11 @@ class ReplayEngine:
                         trade.setup_id,
                         {
                             "trade_id": trade.id,
+                            "confirmation_method": next(
+                                setup.confirmation_method
+                                for setup in setups
+                                if setup.id == trade.setup_id
+                            ),
                             "entry_price": str(trade.entry_price),
                             "stop_price": str(trade.stop_price),
                             "take_price": str(trade.take_price),
@@ -357,13 +419,18 @@ class ReplayEngine:
         return as_json(
             {
                 "run_id": self.run_id,
+                "confirmation_methods": list(self.config.confirmation_methods),
                 "status": self._status,
                 "cursor": self._cursor,
                 "total_candles": len(self._source_candles),
                 "pivots": self._pivots,
                 "levels": self._levels.levels,
                 "outcomes": self._outcomes.outcomes,
-                "setups": self._confirmation.setups,
+                "setups": [
+                    setup
+                    for confirmation in self._confirmations.values()
+                    for setup in confirmation.setups
+                ],
                 "trades": self._execution.trades,
                 "master_candles": visible_master,
                 "detail_candles": visible_detail,

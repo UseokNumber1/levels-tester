@@ -18,6 +18,7 @@ def test_default_algorithm_configuration_matches_replay_specification() -> None:
     assert config.detail_timeframe == "1m"
     assert config.default_speed == 10.0
     assert config.detail_timeframes == ("1m", "5m")
+    assert config.confirmation.method == "bounce"
     assert config.confirmation.timeframe == "1m"
     assert config.confirmation.required_bars == 2
     assert config.execution.risk_reward == Decimal(2)

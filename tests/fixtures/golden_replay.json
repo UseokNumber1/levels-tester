@@ -18,6 +18,7 @@
     [3, "level.created"],
     [4, "level.approaching"],
     [5, "level.touched"],
+    [5, "setup.created"],
     [6, "level.broken"]
   ]
 }

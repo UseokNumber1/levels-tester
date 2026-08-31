@@ -16,7 +16,7 @@
     <section class="control-panel">
       <label>Symbol<select id="symbol"><option>Loading instruments...</option></select></label>
       <label>Display from<input id="display-from" type="date"></label>
-      <label>Speed<input id="speed" type="number" min="1" max="100" step="1" value="1"></label>
+      <label>Speed<input id="speed" type="range" min="1" max="100" step="1" value="10"><span id="speed-value">10×</span></label>
       <label>Detail TF<select id="detail-tf"><option value="1m">M1</option><option value="5m">M5</option></select></label>
       <button id="create" class="primary">New replay</button>
       <span class="panel-divider"></span>
@@ -24,6 +24,26 @@
       <label>Min 24h volume<input id="min-volume" type="number" min="0" step="1000000" placeholder="0"></label>
       <button id="refresh-instruments">Refresh</button>
       <span id="instrument-info">Loading symbols from Binance...</span>
+    </section>
+    <section class="settings-panel card">
+      <div class="settings-head">
+        <div><span class="eyebrow">EXPERIMENT SETTINGS</span><h2>Entry confirmation</h2></div>
+        <span class="settings-note">Visual mode uses one method. Multiple methods are for the specialized experiment mode.</span>
+      </div>
+      <div class="settings-body">
+        <fieldset class="method-group">
+          <legend>Confirmation method</legend>
+          <label class="method-option"><input id="confirmation-method-touch" type="radio" name="confirmation-method" value="touch"><span class="method-number">1</span><span><strong>Touch</strong><small>Entry after the level is touched</small></span></label>
+          <label class="method-option"><input id="confirmation-method-consecutive" type="radio" name="confirmation-method" value="consecutive"><span class="method-number">3</span><span><strong>N consecutive closes</strong><small>Closes beyond the level in trade direction</small></span></label>
+          <label class="method-option"><input id="confirmation-method-bounce" type="radio" name="confirmation-method" value="bounce" checked><span class="method-number">5</span><span><strong>Bounce</strong><small>Directional candle body after the touch</small></span></label>
+        </fieldset>
+        <fieldset class="setting-group">
+          <legend>Confirmation parameters</legend>
+          <label>Confirming candles<input id="confirmation-bars" type="number" min="1" max="100" step="1" value="2"></label>
+          <label>Max wait bars<input id="confirmation-max-wait" type="number" min="1" max="500" step="1" value="15"></label>
+          <div class="settings-placeholder"><strong>SL / TP variants</strong><span>Will be added in the next experiment stage.</span></div>
+        </fieldset>
+      </div>
     </section>
     <section id="loading-bar" class="loading-bar hidden">
       <div class="loading-progress"><div id="loading-fill" class="loading-fill" style="width: 0%"></div></div>

@@ -14,11 +14,12 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from level_tester.application.ingestion import DataIngestionService
 from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
+from level_tester.domain.confirmation import SUPPORTED_CONFIRMATION_METHODS
 from level_tester.domain.models import Candle
 from level_tester.domain.search.levels import price_precision_from_tick
 from level_tester.infrastructure.binance import BinanceFuturesClient
@@ -56,6 +57,9 @@ class RunCreate(BaseModel):
     calculation_from: datetime | None = None
     effective_to: datetime | None = None
     detail_timeframe: str = Field(default="1m", pattern=r"^(1m|5m)$")
+    confirmation_methods: list[str] = Field(default_factory=lambda: ["bounce"])
+    confirmation_required_bars: int = Field(default=2, ge=1, le=100)
+    confirmation_max_wait_bars: int = Field(default=15, ge=1, le=500)
     # Optional closed candles are useful for local imports and deterministic tests.
     seed_candles: list[CandleInput] = Field(default_factory=list)
 
@@ -65,6 +69,29 @@ class RunCreate(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("timestamps must include a timezone")
         return value
+
+    @field_validator("confirmation_methods")
+    @classmethod
+    def validate_confirmation_methods(cls, value: list[str]) -> list[str]:
+        methods = [method.lower() for method in value]
+        if (
+            not methods
+            or len(set(methods)) != len(methods)
+            or not set(methods) <= set(SUPPORTED_CONFIRMATION_METHODS)
+        ):
+            raise ValueError(
+                "confirmation_methods must contain unique methods from: "
+                + ", ".join(SUPPORTED_CONFIRMATION_METHODS)
+            )
+        return methods
+
+    @model_validator(mode="after")
+    def validate_confirmation_limits(self) -> "RunCreate":
+        if (
+            self.confirmation_max_wait_bars < self.confirmation_required_bars
+        ):
+            raise ValueError("confirmation_max_wait_bars must be >= confirmation_required_bars")
+        return self
 
 
 class SpeedUpdate(BaseModel):
@@ -160,6 +187,11 @@ async def replay_config() -> dict[str, Any]:
             "default_speed": default_config.default_speed,
             "detail_timeframes": list(default_config.detail_timeframes),
             "default_detail_timeframe": default_config.detail_timeframe,
+            "confirmation_methods": [
+                {"id": "touch", "number": 1, "label": "Touch"},
+                {"id": "consecutive", "number": 3, "label": "N consecutive closes"},
+                {"id": "bounce", "number": 5, "label": "Bounce"},
+            ],
         }
     }
 
@@ -230,7 +262,14 @@ async def create_run(request: RunCreate) -> dict[str, Any]:
     )
     try:
         run = service.create_loading(
-            request.symbol, display_from, calculation_from, effective_to, request.detail_timeframe
+            request.symbol,
+            display_from,
+            calculation_from,
+            effective_to,
+            request.detail_timeframe,
+            tuple(request.confirmation_methods),
+            request.confirmation_required_bars,
+            request.confirmation_max_wait_bars,
         )
         _persist_run(run)
         seed = [item.to_domain() for item in request.seed_candles] or None
@@ -400,8 +439,13 @@ def _load_run(run_id: str, seed: list[Candle] | None) -> None:
             level=replace(default_config.level, tick_size=instrument_tick),
             detail_timeframe=run.detail_timeframe,
             confirmation=replace(
-                default_config.confirmation, timeframe=run.detail_timeframe
+                default_config.confirmation,
+                method=run.confirmation_methods[0],
+                timeframe=run.detail_timeframe,
+                required_bars=run.confirmation_required_bars,
+                max_wait_bars=run.confirmation_max_wait_bars,
             ),
+            confirmation_methods=run.confirmation_methods,
         )
         service.complete_loading(
             run_id,
@@ -441,7 +485,12 @@ def _persist_run(run) -> None:
                 run.window.effective_to,
                 run.status.value,
                 run.config_hash,
-                {"detail_timeframe": run.detail_timeframe},
+                {
+                    "detail_timeframe": run.detail_timeframe,
+                    "confirmation_methods": list(run.confirmation_methods),
+                    "confirmation_required_bars": run.confirmation_required_bars,
+                    "confirmation_max_wait_bars": run.confirmation_max_wait_bars,
+                },
                 run.data_set_id,
                 run.progress,
                 run.error_message,

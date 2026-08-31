@@ -8,6 +8,9 @@ from enum import StrEnum
 from level_tester.domain.models import LevelSide
 
 
+SUPPORTED_CONFIRMATION_METHODS = ("touch", "consecutive", "bounce")
+
+
 class TradeSetupStatus(StrEnum):
     WAITING_CONFIRMATION = "waiting_confirmation"
     ENTRY_CONFIRMED = "entry_confirmed"
@@ -17,12 +20,18 @@ class TradeSetupStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ConfirmationConfig:
+    method: str = "bounce"
     timeframe: str = "1m"
     required_bars: int = 2
     max_wait_bars: int = 15
     entry_on_next_bar: bool = True
 
     def __post_init__(self) -> None:
+        if self.method not in SUPPORTED_CONFIRMATION_METHODS:
+            raise ValueError(
+                "confirmation method must be one of: "
+                + ", ".join(SUPPORTED_CONFIRMATION_METHODS)
+            )
         if self.timeframe not in {"1m", "5m"}:
             raise ValueError("confirmation timeframe must be 1m or 5m")
         if self.required_bars < 1 or self.max_wait_bars < self.required_bars:
@@ -47,3 +56,4 @@ class TradeSetup:
     bars_waited: int = 0
     cancelled_time: datetime | None = None
     reason: str | None = None
+    confirmation_method: str = "bounce"

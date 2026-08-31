@@ -37,13 +37,19 @@ class EntryConfirmation:
                 touch_bar_close = _event_time(touch_event, "candle_close_time")
                 self.setups.append(
                     TradeSetup(
-                        id=str(uuid5(NAMESPACE_URL, f"{self.run_id}:{level.id}:{level.touch_count}")),
+                        id=str(
+                            uuid5(
+                                NAMESPACE_URL,
+                                f"{self.run_id}:{self.config.method}:{level.id}:{level.touch_count}",
+                            )
+                        ),
                         level_id=level.id,
                         side=level.side,
                         touch_time=touch_event.event_time,
                         source_touch_time=touch_event.event_time,
                         touch_bar_open_time=touch_bar_open,
                         touch_bar_close_time=touch_bar_close,
+                        confirmation_method=self.config.method,
                     )
                 )
 
@@ -57,6 +63,12 @@ class EntryConfirmation:
                 continue
             if not setup.touch_refined:
                 self._refine_touch(setup, level, detail_candles)
+            if self.config.method == "touch":
+                setup.status = TradeSetupStatus.ENTRY_CONFIRMED
+                setup.confirmed_time = setup.touch_time
+                setup.reason = "touch entry"
+                self._set_entry(setup, detail_candles)
+                continue
             candles = [
                 candle
                 for candle in detail_candles
@@ -95,11 +107,16 @@ class EntryConfirmation:
             for setup in self.setups
         )
 
-    @staticmethod
-    def _is_confirming(candle: Candle, level: Level) -> bool:
+    def _is_confirming(self, candle: Candle, level: Level) -> bool:
         if level.side == LevelSide.SUPPORT:
-            return candle.close > candle.open and candle.close >= level.price
-        return candle.close < candle.open and candle.close <= level.price
+            in_direction = candle.close > level.price
+            if self.config.method == "bounce":
+                return candle.close > candle.open and in_direction
+            return in_direction
+        in_direction = candle.close < level.price
+        if self.config.method == "bounce":
+            return candle.close < candle.open and in_direction
+        return in_direction
 
     def _set_entry(self, setup: TradeSetup, detail_candles: list[Candle]) -> None:
         if setup.confirmed_time is None:

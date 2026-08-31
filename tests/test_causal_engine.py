@@ -53,7 +53,7 @@ def test_replay_is_deterministic_and_does_not_expose_future_candles() -> None:
     window = ReplayWindow(bars[0].open_time, bars[-1].close_time, bars[0].open_time)
     config = ReplayConfig(
         pivot=PivotDetectorConfig(wing=2, min_volume_ratio=None),
-        level=LevelConfig(zone_percent=Decimal("0.008"), min_touches=1),
+        level=LevelConfig(zone_percent=Decimal("0.008"), min_touches=1, min_bounce_percent=Decimal(0)),
     )
     first = ReplayEngine("run-a", window, bars, config=config)
     second = ReplayEngine("run-a", window, bars, config=config)
@@ -88,7 +88,7 @@ def test_checkpoint_restore_rebuilds_the_same_state() -> None:
     window = ReplayWindow(bars[0].open_time, bars[-1].close_time, bars[0].open_time)
     config = ReplayConfig(
         pivot=PivotDetectorConfig(wing=2, min_volume_ratio=None),
-        level=LevelConfig(zone_percent=Decimal("0.008"), min_touches=1),
+        level=LevelConfig(zone_percent=Decimal("0.008"), min_touches=1, min_bounce_percent=Decimal(0)),
     )
     engine = ReplayEngine("run-checkpoint", window, bars, config=config)
     engine.step()
