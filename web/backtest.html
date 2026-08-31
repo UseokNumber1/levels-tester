@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Levels Tester — Backtester</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { background: #0f1117; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; }
+    h1 { color: #2196F3; border-bottom: 2px solid #2196F3; padding-bottom: 10px; margin-bottom: 20px; font-size: 22px; }
+    h2 { color: #4CAF50; margin: 20px 0 10px; font-size: 16px; }
+    h3 { color: #888; margin: 15px 0 8px; font-size: 14px; }
+    .panel { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 12px; color: #888; }
+    .field input, .field select { padding: 6px 10px; background: #0f1117; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; font-size: 13px; }
+    .field input:focus, .field select:focus { border-color: #2196F3; outline: none; }
+    button.primary { padding: 8px 20px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; }
+    button.primary:hover { background: #1976D2; }
+    button.primary:disabled { background: #555; cursor: not-allowed; }
+    button.secondary { padding: 6px 14px; background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    button.secondary:hover { background: #444; }
+    .signals-table { width: 100%; border-collapse: collapse; font-size: 12px; max-height: 300px; overflow-y: auto; display: block; }
+    .signals-table th { background: #16213e; color: #2196F3; padding: 6px 10px; text-align: left; position: sticky; top: 0; }
+    .signals-table td { padding: 5px 10px; border-bottom: 1px solid #222; }
+    .signals-table tr:hover { background: #16213e; }
+    .signals-table input[type="checkbox"] { cursor: pointer; }
+    .variant-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+    .variant-card { background: #16213e; border: 1px solid #333; border-radius: 6px; padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .variant-card:hover { border-color: #2196F3; }
+    .variant-card.selected { border-color: #4CAF50; background: #1b3a1b; }
+    .variant-card input { cursor: pointer; }
+    .variant-card .tags { font-size: 10px; color: #888; margin-left: auto; }
+    .tag { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 3px; }
+    .tag-trail { background: #1b5e20; color: #81c784; }
+    .tag-be { background: #e65100; color: #ffb74d; }
+    .tag-partial { background: #4a148c; color: #ce93d8; }
+    .progress-bar { height: 20px; background: #16213e; border-radius: 4px; overflow: hidden; margin: 10px 0; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #2196F3, #4CAF50); transition: width 0.3s; display: flex; align-items: center; justify-content: center; font-size: 11px; color: white; font-weight: bold; }
+    .results-tabs { display: flex; gap: 0; border-bottom: 2px solid #333; margin-bottom: 10px; }
+    .results-tab { padding: 8px 16px; cursor: pointer; background: transparent; color: #888; border: none; font-size: 13px; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+    .results-tab.active { color: #2196F3; border-bottom-color: #2196F3; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .metrics-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .metrics-table th { background: #16213e; color: #2196F3; padding: 8px 12px; text-align: left; }
+    .metrics-table td { padding: 7px 12px; border-bottom: 1px solid #222; }
+    .metrics-table tr:hover { background: #16213e; }
+    .metrics-table tr.best { background: #1b3a1b; }
+    .pos { color: #4CAF50; }
+    .neg { color: #f44336; }
+    .chart-box { height: 320px; background: #16213e; border-radius: 6px; padding: 10px; margin: 10px 0; }
+    .trades-filter { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+    .trades-filter select { padding: 5px 8px; background: #0f1117; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; font-size: 12px; }
+    .trades-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .trades-table th { background: #16213e; color: #2196F3; padding: 6px 10px; text-align: left; position: sticky; top: 0; }
+    .trades-table td { padding: 5px 10px; border-bottom: 1px solid #222; }
+    .trades-table tr:hover { background: #16213e; }
+    .trades-scroll { max-height: 400px; overflow-y: auto; }
+    .hidden { display: none !important; }
+    .back-link { display: inline-block; margin-bottom: 15px; color: #2196F3; text-decoration: none; font-size: 13px; }
+    .back-link:hover { text-decoration: underline; }
+    .radio-group { display: flex; gap: 16px; }
+    .radio-group label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <a class="back-link" href="/">&larr; Replay</a>
+  <h1>Backtester — precision_grid_v2 signals</h1>
+
+  <!-- SELECT SIGNALS -->
+  <div class="panel">
+    <h2>Select Signals</h2>
+    <div class="row">
+      <div class="field">
+        <label>Symbol</label>
+        <select id="bt-symbol"><option value="">All symbols</option></select>
+      </div>
+      <div class="field">
+        <label>Period from</label>
+        <input id="bt-period-from" type="date" value="2026-08-01">
+      </div>
+      <div class="field">
+        <label>Period to</label>
+        <input id="bt-period-to" type="date" value="2026-08-31">
+      </div>
+      <div class="field">
+        <label>Side</label>
+        <select id="bt-side"><option value="">All</option><option>LONG</option><option>SHORT</option></select>
+      </div>
+      <button class="secondary" id="bt-load">Load Signals</button>
+    </div>
+    <div id="bt-signals-count" style="margin:8px 0;font-size:12px;color:#888;"></div>
+    <div style="max-height:250px;overflow-y:auto;">
+      <table class="signals-table" id="bt-signals-table">
+        <thead><tr><th><input type="checkbox" id="bt-sel-all"></th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>RR</th><th>Date</th><th>Source</th></tr></thead>
+        <tbody id="bt-signals-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- EXECUTION SETTINGS -->
+  <div class="panel">
+    <h2>Execution Settings</h2>
+    <div class="row" style="margin-bottom:12px;">
+      <div class="field">
+        <label>Entry type</label>
+        <div class="radio-group">
+          <label><input type="radio" name="bt-entry" value="market" checked> Market</label>
+          <label><input type="radio" name="bt-entry" value="limit"> Limit</label>
+          <label><input type="radio" name="bt-entry" value="confirmation"> Confirmation</label>
+        </div>
+      </div>
+      <div class="field" id="bt-limit-field">
+        <label>Limit offset %</label>
+        <input id="bt-limit-offset" type="number" step="0.1" value="0.2" min="0" max="5" style="width:80px;">
+      </div>
+      <div class="field hidden" id="bt-conf-field">
+        <label>Confirmation bars</label>
+        <input id="bt-conf-bars" type="number" value="2" min="1" max="20" style="width:60px;">
+      </div>
+      <div class="field hidden" id="bt-conf-wait-field">
+        <label>Max wait bars</label>
+        <input id="bt-conf-wait" type="number" value="15" min="1" max="100" style="width:60px;">
+      </div>
+      <div class="field">
+        <label>Lookback</label>
+        <input id="bt-lookback" type="number" value="50" min="10" max="500" style="width:70px;">
+      </div>
+      <div class="field">
+        <label>Lookforward</label>
+        <input id="bt-lookforward" type="number" value="200" min="20" max="1000" style="width:70px;">
+      </div>
+    </div>
+
+    <h3>Variants</h3>
+    <div class="variant-grid" id="bt-variants-grid"></div>
+  </div>
+
+  <!-- RUN -->
+  <div class="panel">
+    <button class="primary" id="bt-run" disabled>Run Backtest</button>
+    <div id="bt-progress-wrap" class="hidden" style="margin-top:10px;">
+      <div class="progress-bar"><div class="progress-fill" id="bt-progress-fill" style="width:0%">0%</div></div>
+      <div style="font-size:12px;color:#888;" id="bt-progress-text">Preparing...</div>
+    </div>
+    <div id="bt-error" style="color:#f44336;margin-top:8px;font-size:13px;" class="hidden"></div>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="panel hidden" id="bt-results-wrap">
+    <h2>Results</h2>
+    <div class="results-tabs">
+      <button class="results-tab active" data-tab="summary">Summary</button>
+      <button class="results-tab" data-tab="equity">Equity Curve</button>
+      <button class="results-tab" data-tab="trades">All Trades</button>
+    </div>
+
+    <!-- Summary -->
+    <div class="tab-panel active" id="tab-summary">
+      <table class="metrics-table">
+        <thead><tr><th>Variant</th><th>Trades</th><th>Winrate</th><th>PnL</th><th>PF</th><th>Max DD</th><th>Avg Win</th><th>Avg Loss</th><th>Expectancy</th><th>Avg Bars</th></tr></thead>
+        <tbody id="bt-metrics-body"></tbody>
+      </table>
+      <div style="margin-top:15px;">
+        <h3>By Side</h3>
+        <div id="bt-side-stats" style="display:flex;gap:15px;"></div>
+      </div>
+      <div style="margin-top:15px;">
+        <h3>By Symbol</h3>
+        <table class="metrics-table" style="max-width:500px;">
+          <thead><tr><th>Symbol</th><th>Trades</th><th>Winrate</th><th>PnL</th></tr></thead>
+          <tbody id="bt-symbol-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Equity Curve -->
+    <div class="tab-panel" id="tab-equity">
+      <div class="chart-box"><canvas id="bt-equity-chart"></canvas></div>
+      <h3>PnL by Variant</h3>
+      <div class="chart-box" style="height:200px;"><canvas id="bt-pnl-chart"></canvas></div>
+    </div>
+
+    <!-- Trades -->
+    <div class="tab-panel" id="tab-trades">
+      <div class="trades-filter">
+        <select id="bt-f-symbol"><option value="">All symbols</option></select>
+        <select id="bt-f-side"><option value="">All sides</option><option>LONG</option><option>SHORT</option></select>
+        <select id="bt-f-result"><option value="">All results</option><option value="win">Win</option><option value="loss">Loss</option></select>
+        <select id="bt-f-variant"><option value="">All variants</option></select>
+      </div>
+      <div class="trades-scroll">
+        <table class="trades-table">
+          <thead><tr><th>#</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>PnL %</th><th>Bars</th><th>Reason</th><th>Variant</th></tr></thead>
+          <tbody id="bt-trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/backtest.js"></script>
+</body>
+</html>

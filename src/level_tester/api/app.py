@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from level_tester.application.ingestion import DataIngestionService
 from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
+from level_tester.backtester.backtest_engine import BacktestEngine
+from level_tester.backtester.entry_types import EntryType
+from level_tester.backtester.metrics import compute_all_metrics
+from level_tester.backtester.signal_reader import SignalReader
+from level_tester.backtester.variants import BUILTIN_VARIANTS, get_builtin
 from level_tester.domain.confirmation import SUPPORTED_CONFIRMATION_METHODS
 from level_tester.domain.models import Candle
 from level_tester.domain.search.levels import price_precision_from_tick
@@ -149,7 +154,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.4.6", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version="0.4.7", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
@@ -199,6 +204,11 @@ async def replay_config() -> dict[str, Any]:
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/backtest", include_in_schema=False)
+async def backtest_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "backtest.html")
 
 
 @app.post("/api/instruments/sync")
@@ -370,6 +380,238 @@ async def events(websocket: WebSocket, run_id: str, after_sequence: int = -1) ->
             await websocket.receive_text()
     except WebSocketDisconnect:
         return
+
+
+# ---------------------------------------------------------------------------
+# Backtester API
+# ---------------------------------------------------------------------------
+PGV2_TRADING_DB = os.environ.get(
+    "PGV2_TRADING_DB",
+    r"E:\Pyton_project\precision_grid_v2\data\db\trading.db",
+)
+PGV2_ARCHIVE_DB = os.environ.get(
+    "PGV2_ARCHIVE_DB",
+    r"E:\Pyton_project\precision_grid_v2\data\db\signal_archive.db",
+)
+
+_backtest_jobs: dict[str, dict[str, Any]] = {}
+_backtest_counter = 0
+
+
+class BacktestRunRequest(BaseModel):
+    signal_ids: list[str] = Field(min_length=1, max_length=200)
+    variants: list[str] = Field(default_factory=lambda: [v.id for v in BUILTIN_VARIANTS[:3]])
+    entry_type: str = Field(default="market", pattern=r"^(market|limit|confirmation)$")
+    lookback: int = Field(default=50, ge=10, le=500)
+    lookforward: int = Field(default=200, ge=20, le=1000)
+    limit_offset: float = Field(default=0.2, ge=0, le=5)
+    confirmation_bars: int = Field(default=2, ge=1, le=20)
+    confirmation_max_wait: int = Field(default=15, ge=1, le=100)
+
+
+@app.get("/api/backtest/signals")
+async def backtest_signals(
+    symbol: str = "",
+    side: str = "",
+    period: str = "",
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
+    period_start, period_end = (period.split(":") if ":" in period else (None, None))
+    signals = reader.read(
+        symbol=symbol or None,
+        side=side or None,
+        period_start=period_start,
+        period_end=period_end,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "signal_id": s.signal_id,
+                "symbol": s.symbol,
+                "side": s.side,
+                "entry_price": s.entry_price,
+                "stop_loss": s.stop_loss,
+                "rr_ratio": s.rr_ratio,
+                "timeframe": s.timeframe,
+                "timestamp": s.timestamp,
+                "source": s.source,
+            }
+            for s in signals
+        ],
+        "count": len(signals),
+    }
+
+
+@app.get("/api/backtest/symbols")
+async def backtest_symbols() -> dict[str, Any]:
+    reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
+    symbols = reader.symbols()
+    return {"items": symbols, "count": len(symbols)}
+
+
+@app.get("/api/backtest/variants")
+async def backtest_variants() -> dict[str, Any]:
+    return {
+        "items": [
+            {
+                "id": v.id,
+                "name": v.name,
+                "sl_pct": str(v.sl_pct),
+                "tp_rr": str(v.tp_rr) if v.tp_rr else None,
+                "tp_pct": str(v.tp_pct) if v.tp_pct else None,
+                "trailing": v.trailing_activation_pct is not None,
+                "breakeven": v.breakeven_trigger_pct is not None,
+                "partial": v.partial_close_pct is not None,
+            }
+            for v in BUILTIN_VARIANTS
+        ],
+        "count": len(BUILTIN_VARIANTS),
+    }
+
+
+@app.post("/api/backtest/run", status_code=202)
+async def backtest_run(request: BacktestRunRequest) -> dict[str, Any]:
+    global _backtest_counter
+    _backtest_counter += 1
+    job_id = f"bt_{_backtest_counter}"
+
+    _backtest_jobs[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "total": len(request.signal_ids),
+        "current_symbol": "",
+        "results": None,
+        "error": None,
+    }
+
+    Thread(
+        target=_run_backtest,
+        args=(job_id, request),
+        daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/backtest/status/{job_id}")
+async def backtest_status(job_id: str) -> dict[str, Any]:
+    job = _backtest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/api/backtest/report/{job_id}")
+async def backtest_report(job_id: str) -> dict[str, Any]:
+    job = _backtest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=409, detail="job not completed yet")
+    return job.get("results", {})
+
+
+def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
+    job = _backtest_jobs[job_id]
+    try:
+        job["status"] = "running"
+
+        reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
+        all_signals = []
+        for sid in request.signal_ids:
+            found = reader.read(signal_id=sid, include_archive=True, limit=1)
+            all_signals.extend(found)
+
+        if not all_signals:
+            job["status"] = "failed"
+            job["error"] = "no signals found for given IDs"
+            return
+
+        variants = get_builtin(request.variants)
+        entry_type = EntryType(request.entry_type)
+
+        client = BinanceFuturesClient()
+        engine = BacktestEngine(client)
+
+        def progress(current, total, symbol):
+            job["progress"] = current
+            job["total"] = total
+            job["current_symbol"] = symbol
+
+        results = engine.run_all(
+            all_signals, variants, entry_type,
+            lookback_bars=request.lookback,
+            lookforward_bars=request.lookforward,
+            limit_offset_pct=request.limit_offset,
+            confirmation_bars=request.confirmation_bars,
+            confirmation_max_wait=request.confirmation_max_wait,
+            progress_callback=progress,
+        )
+
+        by_variant: dict[str, list] = {}
+        for r in results:
+            if r.trade is not None:
+                by_variant.setdefault(r.variant.id, []).append(r.trade)
+
+        metrics = compute_all_metrics(by_variant)
+
+        job["status"] = "completed"
+        job["progress"] = job["total"]
+        job["results"] = {
+            "metrics": [
+                {
+                    "variant_id": m.variant_id,
+                    "variant_name": m.variant_name,
+                    "total_trades": m.total_trades,
+                    "wins": m.wins,
+                    "losses": m.losses,
+                    "winrate": round(m.winrate, 1),
+                    "total_pnl": float(m.total_pnl),
+                    "avg_pnl": float(m.avg_pnl),
+                    "avg_win": float(m.avg_win),
+                    "avg_loss": float(m.avg_loss),
+                    "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else "Infinity",
+                    "max_drawdown": float(m.max_drawdown),
+                    "expectancy": float(m.expectancy),
+                    "avg_bars_held": round(m.avg_bars_held, 1),
+                    "long_trades": m.long_trades,
+                    "short_trades": m.short_trades,
+                    "long_winrate": round(m.long_winrate, 1),
+                    "short_winrate": round(m.short_winrate, 1),
+                    "equity_curve": m.equity_curve,
+                }
+                for m in metrics
+            ],
+            "trades": [
+                {
+                    "signal_id": r.signal.signal_id,
+                    "symbol": r.signal.symbol,
+                    "side": r.trade.side,
+                    "entry_price": str(r.trade.entry_price),
+                    "entry_time": r.trade.entry_time.isoformat() if r.trade.entry_time else None,
+                    "exit_price": str(r.trade.exit_price) if r.trade.exit_price else None,
+                    "exit_time": r.trade.exit_time.isoformat() if r.trade.exit_time else None,
+                    "exit_reason": r.trade.exit_reason,
+                    "pnl": float(r.trade.pnl) if r.trade.pnl is not None else 0,
+                    "pnl_pct": float(r.trade.pnl_pct) if r.trade.pnl_pct is not None else 0,
+                    "bars_held": r.trade.bars_held,
+                    "stop_price": str(r.trade.stop_price),
+                    "take_price": str(r.trade.take_price),
+                    "variant_id": r.variant.id,
+                    "variant_name": r.variant.name,
+                }
+                for r in results
+                if r.trade is not None
+            ],
+            "signals_count": len(all_signals),
+            "entry_type": request.entry_type,
+        }
+
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)[:500]
 
 
 def _load_run(run_id: str, seed: list[Candle] | None) -> None:
