@@ -8,6 +8,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Thread
+
+_APP_DIR = Path(__file__).resolve().parents[3]
+_VERSION_FILE = _APP_DIR / "VERSION"
+APP_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -21,7 +25,7 @@ from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
 from level_tester.backtester.backtest_engine import BacktestEngine
 from level_tester.backtester.entry_types import EntryType
-from level_tester.backtester.metrics import compute_all_metrics
+from level_tester.backtester.metrics import compute_all_metrics, compute_all_metrics_by_key
 from level_tester.backtester.signal_reader import SignalReader
 from level_tester.backtester.variants import BUILTIN_VARIANTS, get_builtin
 from level_tester.domain.confirmation import SUPPORTED_CONFIRMATION_METHODS
@@ -129,6 +133,7 @@ run_repository = RunRepository()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    print(f"Levels Tester v{APP_VERSION} starting...")
     # An unreachable SQL server (or missing database) must not prevent startup;
     # check_database() reports the exact state to /api/status and the UI.
     try:
@@ -154,7 +159,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Levels Tester", version="0.4.7", lifespan=lifespan)
+app = FastAPI(title="Levels Tester", version=APP_VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
@@ -398,15 +403,51 @@ _backtest_jobs: dict[str, dict[str, Any]] = {}
 _backtest_counter = 0
 
 
+class VariantPayload(BaseModel):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[a-zA-Z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=80)
+    sl_pct: Decimal = Field(gt=0, le=20)
+    tp_rr: Decimal | None = Field(default=None, gt=0, le=999)
+    tp_pct: Decimal | None = Field(default=None, gt=0, le=100)
+    trailing_activation_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    trailing_stop_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    trailing_update_threshold_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    trailing_tp_only: bool = False
+    breakeven_trigger_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    breakeven_lock_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    partial_close_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    partial_close_rr: Decimal | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_tp(self) -> "VariantPayload":
+        if self.tp_rr is not None and self.tp_pct is not None:
+            raise ValueError("tp_rr and tp_pct are mutually exclusive (выберите RR либо %)")
+        return self
+
+
 class BacktestRunRequest(BaseModel):
     signal_ids: list[str] = Field(min_length=1, max_length=200)
     variants: list[str] = Field(default_factory=lambda: [v.id for v in BUILTIN_VARIANTS[:3]])
-    entry_type: str = Field(default="market", pattern=r"^(market|limit|confirmation)$")
-    lookback: int = Field(default=50, ge=10, le=500)
-    lookforward: int = Field(default=200, ge=20, le=1000)
+    custom_variants: list[VariantPayload] = Field(default_factory=list)
+    entry_type: str = Field(default="confirmation", pattern=r"^confirmation$")
+    lookback: int = Field(default=0, ge=0, le=500)
+    lookforward: int = Field(default=1000, ge=20, le=2000)
     limit_offset: float = Field(default=0.2, ge=0, le=5)
-    confirmation_bars: int = Field(default=2, ge=1, le=20)
-    confirmation_max_wait: int = Field(default=15, ge=1, le=100)
+    confirmation_bars: int = Field(default=2, ge=0, le=20)
+    confirmation_methods: list[int] = Field(default=[0, 1, 2], description="0=touch, 1=1bar, 2=2bars")
+
+    @model_validator(mode="after")
+    def validate_variants(self) -> "BacktestRunRequest":
+        if self.custom_variants:
+            ids = [v.id for v in self.custom_variants]
+            if len(ids) != len(set(ids)):
+                raise ValueError("custom_variants: duplicate id")
+        return self
+
+
+@app.get("/api/version")
+async def version() -> dict[str, str]:
+    return {"version": APP_VERSION}
 
 
 @app.get("/api/backtest/signals")
@@ -415,6 +456,9 @@ async def backtest_signals(
     side: str = "",
     period: str = "",
     limit: int = Query(default=100, ge=1, le=500),
+    only_working_level: bool = Query(default=True, description="Only signals with a validated working level"),
+    include_trading: bool = Query(default=False, description="Include signals from trading.db"),
+    include_archive: bool = Query(default=True, description="Include signals from signal_archive.db"),
 ) -> dict[str, Any]:
     reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
     period_start, period_end = (period.split(":") if ":" in period else (None, None))
@@ -424,6 +468,9 @@ async def backtest_signals(
         period_start=period_start,
         period_end=period_end,
         limit=limit,
+        only_working_level=only_working_level,
+        include_trading=include_trading,
+        include_archive=include_archive,
     )
     return {
         "items": [
@@ -461,6 +508,14 @@ async def backtest_variants() -> dict[str, Any]:
                 "sl_pct": str(v.sl_pct),
                 "tp_rr": str(v.tp_rr) if v.tp_rr else None,
                 "tp_pct": str(v.tp_pct) if v.tp_pct else None,
+                "trailing_activation_pct": str(v.trailing_activation_pct) if v.trailing_activation_pct is not None else None,
+                "trailing_stop_pct": str(v.trailing_stop_pct) if v.trailing_stop_pct is not None else None,
+                "trailing_update_threshold_pct": str(v.trailing_update_threshold_pct) if v.trailing_update_threshold_pct is not None else None,
+                "trailing_tp_only": v.trailing_tp_only,
+                "breakeven_trigger_pct": str(v.breakeven_trigger_pct) if v.breakeven_trigger_pct is not None else None,
+                "breakeven_lock_pct": str(v.breakeven_lock_pct) if v.breakeven_lock_pct is not None else None,
+                "partial_close_pct": str(v.partial_close_pct) if v.partial_close_pct is not None else None,
+                "partial_close_rr": str(v.partial_close_rr) if v.partial_close_rr is not None else None,
                 "trailing": v.trailing_activation_pct is not None,
                 "breakeven": v.breakeven_trigger_pct is not None,
                 "partial": v.partial_close_pct is not None,
@@ -529,33 +584,81 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
             job["error"] = "no signals found for given IDs"
             return
 
-        variants = get_builtin(request.variants)
+        # Build variants: custom payloads override builtin by id; selected ids must exist
+        from level_tester.backtester.variants import Variant
+
+        custom_by_id: dict[str, Variant] = {}
+        for p in request.custom_variants:
+            custom_by_id[p.id] = Variant(
+                id=p.id,
+                name=p.name,
+                sl_pct=p.sl_pct,
+                tp_rr=p.tp_rr,
+                tp_pct=p.tp_pct,
+                trailing_activation_pct=p.trailing_activation_pct,
+                trailing_stop_pct=p.trailing_stop_pct,
+                trailing_update_threshold_pct=p.trailing_update_threshold_pct,
+                trailing_tp_only=p.trailing_tp_only,
+                breakeven_trigger_pct=p.breakeven_trigger_pct,
+                breakeven_lock_pct=p.breakeven_lock_pct,
+                partial_close_pct=p.partial_close_pct,
+                partial_close_rr=p.partial_close_rr,
+            )
+        builtin_by_id = {v.id: v for v in get_builtin()}
+        variants: list[Variant] = []
+        for vid in request.variants:
+            if vid in custom_by_id:
+                variants.append(custom_by_id[vid])
+            elif vid in builtin_by_id:
+                variants.append(builtin_by_id[vid])
+            else:
+                job["status"] = "failed"
+                job["error"] = f"unknown variant id: {vid}"
+                return
+        if not variants:
+            job["status"] = "failed"
+            job["error"] = "no variants selected"
+            return
         entry_type = EntryType(request.entry_type)
 
         client = BinanceFuturesClient()
         engine = BacktestEngine(client)
+
+        METHOD_LABELS = {0: "Touch", 1: "1 bar", 2: "2 bars"}
+        methods = request.confirmation_methods or [2]
+        total_signals = len(all_signals) * len(methods)
 
         def progress(current, total, symbol):
             job["progress"] = current
             job["total"] = total
             job["current_symbol"] = symbol
 
-        results = engine.run_all(
-            all_signals, variants, entry_type,
-            lookback_bars=request.lookback,
-            lookforward_bars=request.lookforward,
-            limit_offset_pct=request.limit_offset,
-            confirmation_bars=request.confirmation_bars,
-            confirmation_max_wait=request.confirmation_max_wait,
-            progress_callback=progress,
-        )
+        all_results = []
+        for method in methods:
+            req_bars = method  # 0=touch, 1=1bar, 2=2bars
+            method_label = METHOD_LABELS.get(method, f"{method} bars")
+            results = engine.run_all(
+                all_signals, variants, entry_type,
+                lookback_bars=request.lookback,
+                lookforward_bars=request.lookforward,
+                limit_offset_pct=request.limit_offset,
+                confirmation_bars=req_bars,
+                confirmation_max_wait=15,  # default max_wait for confirmation phase
+                progress_callback=progress,
+            )
+            # Tag each result with the method for grouping
+            for r in results:
+                r.method = method
+                r.method_label = method_label
+            all_results.extend(results)
 
         by_variant: dict[str, list] = {}
-        for r in results:
+        for r in all_results:
             if r.trade is not None:
-                by_variant.setdefault(r.variant.id, []).append(r.trade)
+                key = f"{r.variant.id}|{r.method}"
+                by_variant.setdefault(key, []).append((r, r.method_label))
 
-        metrics = compute_all_metrics(by_variant)
+        metrics = compute_all_metrics_by_key(by_variant)
 
         job["status"] = "completed"
         job["progress"] = job["total"]
@@ -569,18 +672,24 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
                     "losses": m.losses,
                     "winrate": round(m.winrate, 1),
                     "total_pnl": float(m.total_pnl),
+                    "total_pnl_pct": float(m.total_pnl_pct),
                     "avg_pnl": float(m.avg_pnl),
+                    "avg_pnl_pct": float(m.avg_pnl_pct),
                     "avg_win": float(m.avg_win),
+                    "avg_win_pct": float(m.avg_win_pct),
                     "avg_loss": float(m.avg_loss),
+                    "avg_loss_pct": float(m.avg_loss_pct),
                     "profit_factor": round(m.profit_factor, 2) if m.profit_factor != float("inf") else "Infinity",
                     "max_drawdown": float(m.max_drawdown),
                     "expectancy": float(m.expectancy),
+                    "expectancy_pct": float(m.expectancy_pct),
                     "avg_bars_held": round(m.avg_bars_held, 1),
                     "long_trades": m.long_trades,
                     "short_trades": m.short_trades,
                     "long_winrate": round(m.long_winrate, 1),
                     "short_winrate": round(m.short_winrate, 1),
                     "equity_curve": m.equity_curve,
+                    "equity_curve_pct": m.equity_curve_pct,
                 }
                 for m in metrics
             ],
@@ -601,8 +710,9 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
                     "take_price": str(r.trade.take_price),
                     "variant_id": r.variant.id,
                     "variant_name": r.variant.name,
+                    "confirmation_method": r.method,
                 }
-                for r in results
+                for r in all_results
                 if r.trade is not None
             ],
             "signals_count": len(all_signals),

@@ -19,3 +19,4 @@ build/
 # Runtime files
 logs/
 tmp/
+backtest_*.json

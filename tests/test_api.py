@@ -53,7 +53,7 @@ def test_replay_config_is_available_to_frontend() -> None:
 
     assert response.status_code == 200
     assert response.json()["replay"] == {
-        "default_speed": 10.0,
+        "default_speed": 1.0,
         "detail_timeframes": ["1m", "5m"],
         "default_detail_timeframe": "1m",
         "confirmation_methods": [

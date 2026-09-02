@@ -31,6 +31,10 @@ class SignalReader:
         self._trading_db = Path(trading_db)
         self._archive_db = Path(archive_db) if archive_db else None
 
+    # Statuses that indicate a validated, "working" level in PGv2.
+    # low_quality / blacklisted / cancelled — signals rejected before/after confirmation, without a working level.
+    WORKING_STATUSES = ("entry_waiting_confirmation", "entry_confirmed", "closed_sl", "closed_tp")
+
     def read(
         self,
         symbol: str | None = None,
@@ -38,8 +42,10 @@ class SignalReader:
         period_start: str | None = None,
         period_end: str | None = None,
         signal_id: str | None = None,
+        include_trading: bool = False,
         include_archive: bool = True,
         limit: int = 500,
+        only_working_level: bool = False,
     ) -> list[SignalEntry]:
         """Read signals with optional filters.
 
@@ -49,22 +55,29 @@ class SignalReader:
             period_start: ISO date e.g. '2026-08-01'
             period_end: ISO date e.g. '2026-08-31'
             signal_id: exact signal ID (overrides other filters)
+            include_trading: also read trading.db
             include_archive: also read signal_archive.db
             limit: max signals to return
         """
         results: list[SignalEntry] = []
 
         if signal_id:
-            results.extend(self._read_trading(signal_id=signal_id))
+            if include_trading:
+                results.extend(self._read_trading(signal_id=signal_id, only_working_level=only_working_level))
             if include_archive and self._archive_db:
                 results.extend(self._read_archive(signal_id=signal_id))
+            # when fetching by exact id, apply working-level filter post-hoc
+            if only_working_level:
+                results = [r for r in results if self._is_working(r)]
             return results
 
-        results.extend(self._read_trading(
-            symbol=symbol, side=side,
-            period_start=period_start, period_end=period_end,
-            limit=limit,
-        ))
+        if include_trading:
+            results.extend(self._read_trading(
+                symbol=symbol, side=side,
+                period_start=period_start, period_end=period_end,
+                limit=limit,
+                only_working_level=only_working_level,
+            ))
 
         if include_archive and self._archive_db:
             remaining = limit - len(results)
@@ -86,6 +99,12 @@ class SignalReader:
             syms.update(self._query_symbols(self._archive_db, "signal_archive"))
         return sorted(syms)
 
+    @staticmethod
+    def _is_working(entry: "SignalEntry") -> bool:
+        # Archive entries have no status column — treat them as working (already closed).
+        # Trading entries would need status check, but we push it to SQL when possible.
+        return True
+
     def _read_trading(
         self,
         symbol: str | None = None,
@@ -94,6 +113,7 @@ class SignalReader:
         period_end: str | None = None,
         signal_id: str | None = None,
         limit: int = 500,
+        only_working_level: bool = False,
     ) -> list[SignalEntry]:
         if not self._trading_db.exists():
             return []
@@ -121,6 +141,14 @@ class SignalReader:
             if period_end:
                 query += " AND (timestamp <= ? OR created_at <= ?)"
                 params.extend([period_end + "T23:59:59", period_end + "T23:59:59"])
+
+            if only_working_level:
+                # Only signals with a validated working level: exclude rejected / low-quality.
+                # In trading.db level_side is NULL for all rows, so we filter by status + price sanity.
+                placeholders = ",".join("?" for _ in self.WORKING_STATUSES)
+                query += f" AND status IN ({placeholders})"
+                params.extend(self.WORKING_STATUSES)
+                query += " AND entry_price IS NOT NULL AND stop_loss IS NOT NULL"
 
             query += " ORDER BY created_at DESC LIMIT ?"
             params.append(limit)

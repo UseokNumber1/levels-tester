@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.5.1 (2026-09-03)
+
+### Fixed
+
+- **Backtester entry logic**: rewritten to use M5 timeframe with proper touch/confirmation semantics:
+  - Type 0 (Touch): LIMIT order at entry price fires on touch (candle wick reaches level, close > entry, green for LONG)
+  - Type 1 (1 bar): MARKET on next open after 1 confirming bar (close > entry + green)
+  - Type 2 (2 bars): MARKET on next open after 2 consecutive confirming bars within `max_wait` window
+  - Invalid touch (wick touches but close doesn't confirm) is skipped, search continues
+- **20% distance exit**: trades automatically close with reason `level_invalidated` when price moves 20% away from entry without hitting SL/TP
+- **Candle loading**: switched to M5 timeframe, removed 50-bar lookback (signal already validated), increased lookforward to 1000 bars with automatic reload when exhausted
+- **Symbol grouping footer**: now shows best variant+method per symbol instead of aggregating all trades
+- **Table sorting**: headers now cycle through Descending → Ascending → Disabled (original order) → Descending
+
+### Changed
+
+- Removed `confirmation_max_wait` parameter from API (was `confirmation_max_wait_bars`); max wait only applies to confirmation phase, not trade management
+- Updated default backtest parameters: `lookback=0`, `lookforward=1000`, `confirmation_bars` range 0-20
+- Frontend: removed "Max wait bars" field; added verbose console logging (`[Backtest]` prefix) for grouping, symbol best-variant selection, and footer rendering
+- Cache-buster added to backtest.js (`?v=grouping-debug-2`)
+
+### Added
+
+- Try/catch wrapper around grouping switch with error display in UI
+- Debug table logging in browser console for per-symbol candidate evaluation
+
+### Tests
+
+- All 44 tests pass
+
+## v0.5.0 (2026-09-02)
+
+### Added
+
+- **Backtester module** (`src/level_tester/backtester/`): full backtesting engine with signal reader, candle loader, trade model, entry types, variants, and metrics computation
+- **Backtester web UI** (`web/backtest.html`, `web/backtest.js`): signal selection, variant editing table, equity curve chart, PnL bar chart, trade log with filters
+- **Confirmation methods**: 3 entry confirmation methods tested simultaneously — Touch (0), 1 bar (1), 2 bars (2)
+- **PnL in %**: all metrics, equity curve, and trade table display profit/loss as percentage
+- **Save/Load settings**: export/import all backtest configuration to/from JSON file with native file picker
+- **Summary table sorting**: click column headers to sort results ascending/descending
+- **Grouping option**: toggle between per-variant aggregation and per-symbol best-variant view
+- **Signal source filters**: separate checkboxes for Archive and Trading signal databases
+- **Symbol checklist**: multi-select symbol filter populated from loaded signals with search
+- **Version display**: version number shown in terminal on startup and on backtester page header
+- **API endpoint**: `GET /api/version` returns current version; `GET /api/backtest/signals` supports `include_trading`/`include_archive` params
+
+### Changed
+
+- `VariantMetrics` extended with `total_pnl_pct`, `avg_pnl_pct`, `avg_win_pct`, `avg_loss_pct`, `expectancy_pct`, `equity_curve_pct`
+- `TradeResult` dataclass gained `method` and `method_label` fields for confirmation method tracking
+- `SignalReader.read()` accepts `include_trading` parameter (default `False`)
+- Entry confirmation logic handles `required_bars=0` for immediate touch entry
+
+### Fixed
+
+- Test assertions updated to match current config values (`wing=8`, `default_speed=1.0`)
+
 ## v0.4.6 (2026-08-26)
 
 ### Added

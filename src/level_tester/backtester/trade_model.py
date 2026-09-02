@@ -148,6 +148,12 @@ class BacktestTrade:
                     self._close(self.take_price, candle_time, "take_profit")
                     return True
 
+        # --- 8. Check 20% distance from entry (level invalidated) ---
+        price_move_pct = abs(candle_close - self.entry_price) / self.entry_price * Decimal(100)
+        if price_move_pct >= Decimal("20"):
+            self._close(candle_close, candle_time, "level_invalidated")
+            return True
+
         return False
 
     def _activate_breakeven(self, is_long: bool) -> None:

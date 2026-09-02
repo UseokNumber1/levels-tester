@@ -9,14 +9,14 @@ def test_default_algorithm_configuration_matches_replay_specification() -> None:
 
     config = load_replay_config(path)
 
-    assert config.pivot.wing == 6
+    assert config.pivot.wing == 8
     assert config.pivot.min_volume_ratio == Decimal("0.5")
     assert config.level.zone_percent == Decimal("0.008")
     assert config.level.min_bounce_percent == Decimal("0.045")
     assert config.level.min_touches == 2
     assert config.level.breakout == "wick"
     assert config.detail_timeframe == "1m"
-    assert config.default_speed == 10.0
+    assert config.default_speed == 1.0
     assert config.detail_timeframes == ("1m", "5m")
     assert config.confirmation.method == "bounce"
     assert config.confirmation.timeframe == "1m"

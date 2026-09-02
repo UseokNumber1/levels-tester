@@ -10,7 +10,7 @@
 <body>
   <header class="topbar">
     <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version">v0.4.7</span></h1></div>
-    <div class="server-status"><a href="/backtest" class="nav-btn" title="Open Backtester">Backtester</a><span id="server-dot" class="dot pending"></span><span id="server-status">CHECKING SERVER</span><div id="run-status" class="status">NO RUN</div></div>
+    <div class="server-status"><span id="server-dot" class="dot pending"></span><span id="server-status">CHECKING SERVER</span><div id="run-status" class="status">NO RUN</div></div>
   </header>
   <main class="shell">
     <section class="control-panel">
@@ -19,6 +19,7 @@
       <label>Speed<input id="speed" type="range" min="1" max="100" step="1" value="10"><span id="speed-value">10×</span></label>
       <label>Detail TF<select id="detail-tf"><option value="1m">M1</option><option value="5m">M5</option></select></label>
       <button id="create" class="primary">New replay</button>
+      <a href="/backtest" class="nav-btn">Backtester</a>
       <span class="panel-divider"></span>
       <label>Search<input id="instrument-search" placeholder="BTC, ETH..."></label>
       <label>Min 24h volume<input id="min-volume" type="number" min="0" step="1000000" placeholder="0"></label>
