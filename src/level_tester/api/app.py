@@ -426,7 +426,7 @@ class VariantPayload(BaseModel):
 
 
 class BacktestRunRequest(BaseModel):
-    signal_ids: list[str] = Field(min_length=1, max_length=200)
+    signal_ids: list[str] = Field(min_length=1)
     variants: list[str] = Field(default_factory=lambda: [v.id for v in BUILTIN_VARIANTS[:3]])
     custom_variants: list[VariantPayload] = Field(default_factory=list)
     entry_type: str = Field(default="confirmation", pattern=r"^confirmation$")
@@ -442,6 +442,30 @@ class BacktestRunRequest(BaseModel):
             ids = [v.id for v in self.custom_variants]
             if len(ids) != len(set(ids)):
                 raise ValueError("custom_variants: duplicate id")
+
+        n_signals = len(self.signal_ids)
+        n_variants = len(self.variants)
+        n_methods = len(self.confirmation_methods) or 1
+        n_api_calls = n_signals * n_methods  # свечи грузятся 1 раз на сигнал×метод
+        est_seconds = n_api_calls * 1.5  # ~1.5 сек на API-запрос
+
+        MAX_API_CALLS = 2000
+        if n_api_calls > MAX_API_CALLS:
+            est_min = est_seconds / 60
+            parts = []
+            if n_signals > 800:
+                parts.append(f"сигналов: {n_signals} (рекомендация ≤ 800)")
+            if n_methods > 3:
+                parts.append(f"методов: {n_methods} (рекомендация ≤ 3)")
+            if not parts:
+                parts.append(f"сигналов: {n_signals}, методов: {n_methods}")
+            hint = "; ".join(parts)
+            raise ValueError(
+                f"Слишком долго: {n_api_calls} запросов к бирже "
+                f"({n_signals} сигналов × {n_methods} методов). "
+                f"≈{est_min:.0f} мин. Максимум {MAX_API_CALLS} запросов. "
+                f"Уменьшите: {hint}"
+            )
         return self
 
 

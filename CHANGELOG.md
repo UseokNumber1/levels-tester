@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.0 (2026-09-03)
+
+### Fixed
+
+- **Backtest 422 error on empty inputs**: `lookback` and `lookforward` fields now clamp to valid ranges with fallback defaults instead of sending `null` (parseInt on empty string → NaN → JSON null)
+- **Error messages in UI**: Pydantic validation errors now display as human-readable text instead of `[object Object]`
+
+### Added
+
+- **Smart load validation**: backtest validates `signals × methods` API calls against a 2000-call limit (~50 min estimated time); exceeding shows actionable hint (e.g. "reduce signals: 800, methods: 3")
+- **Live stats bar**: below signal selection shows loaded/selected signals, variants, methods, API call count, and estimated runtime — updates in real time as parameters change
+- **Percentage precision**: winrate, long/short winrate, max drawdown now display with 2 decimal places
+- **PnL chart labels**: variant names always visible on the PnL by Variant bar chart (`autoSkip: false`)
+
+### Changed
+
+- Removed hard `max_length=200` limit on `signal_ids`; replaced with load-based validation
+- Cache buster updated to `?v=fix-422-error`
+
 ## v0.5.1 (2026-09-03)
 
 ### Fixed

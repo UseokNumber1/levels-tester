@@ -91,7 +91,7 @@
         items = items.filter(s => set.has(s.symbol));
       }
       allSignals = items;
-      signalsCount.textContent = `Loaded ${allSignals.length} signals${checked.length ? ' (фильтр по символам)' : ''}`;
+      signalsCount.textContent = `Загружено ${allSignals.length} сигналов${checked.length ? ' (фильтр по символам)' : ''}. Отметьте нужные ниже.`;
       renderSignals();
     } catch (e) {
       signalsCount.textContent = 'Error loading signals: ' + e.message;
@@ -135,9 +135,16 @@
   }
 
   function updateRunBtn() {
-    const hasSignals = getSelectedSignalIds().length > 0;
+    const selectedIds = getSelectedSignalIds();
+    const hasSignals = selectedIds.length > 0;
     const hasVariant = variantRows.some(r => r._selected);
     runBtn.disabled = !(hasSignals && hasVariant);
+    const nMethods = document.querySelectorAll('.bt-conf-method:checked').length || 1;
+    const nVariants = variantRows.filter(r => r._selected).length;
+    const nSignals = selectedIds.length;
+    const apiCalls = nSignals * nMethods;
+    const estMin = (apiCalls * 1.5 / 60).toFixed(0);
+    signalsCount.textContent = `Загружено ${allSignals.length} · выбрано ${nSignals} · вариантов ${nVariants} · методов ${nMethods} · запросов ${apiCalls} ≈${estMin} мин`;
   }
 
   // --- Symbol checklist: populated from loaded signals only ---
@@ -295,6 +302,7 @@
     }
     const selCount = variantRows.filter(r => r._selected).length;
     variantCount.textContent = `${variantRows.length} строк, выбрано ${selCount}`;
+    updateRunBtn();
     // header checkbox state
     if (variantRows.length === 0) { varSelAllCb.checked = false; varSelAllCb.indeterminate = false; }
     else if (selCount === variantRows.length) { varSelAllCb.checked = true; varSelAllCb.indeterminate = false; }
@@ -489,6 +497,7 @@
 
   // --- Run backtest ---
   runBtn.addEventListener('click', startBacktest);
+  document.querySelectorAll('.bt-conf-method').forEach(cb => cb.addEventListener('change', updateRunBtn));
 
   function buildVariantPayloads() {
     const selected = variantRows.filter(r => r._selected);
@@ -565,8 +574,8 @@
         entry_type: entryType,
         limit_offset: 0.2,
         confirmation_methods: Array.from(document.querySelectorAll('.bt-conf-method:checked')).map(cb => parseInt(cb.value)),
-        lookback: parseInt(document.getElementById('bt-lookback').value),
-        lookforward: parseInt(document.getElementById('bt-lookforward').value),
+        lookback: Math.max(0, Math.min(500, parseInt(document.getElementById('bt-lookback').value) || 0)),
+        lookforward: Math.max(20, Math.min(2000, parseInt(document.getElementById('bt-lookforward').value) || 1000)),
       };
 
       const resp = await fetch('/api/backtest/run', {
@@ -578,7 +587,14 @@
       if (resp.status === 202) {
         pollJob(data.job_id);
       } else {
-        throw new Error(data.detail || 'Failed to start backtest');
+        const detail = Array.isArray(data.detail)
+          ? data.detail.map(e => {
+              let msg = e.msg || '';
+              msg = msg.replace(/^Value error,\s*/, '');
+              return msg;
+            }).join('; ')
+          : (data.detail || 'Failed to start backtest');
+        throw new Error(detail);
       }
     } catch (e) {
       errorDiv.textContent = e.message;
@@ -856,10 +872,10 @@
       if (m.total_pnl_pct === bestPnl) tr.className = 'best';
       tr.innerHTML = `<td>${m.variant_name}</td>
         <td>${m.total_trades}</td>
-        <td class="${m.winrate >= 50 ? 'pos' : 'neg'}">${m.winrate}%</td>
+        <td class="${m.winrate >= 50 ? 'pos' : 'neg'}">${m.winrate.toFixed(2)}%</td>
         <td class="${m.total_pnl_pct >= 0 ? 'pos' : 'neg'}">${m.total_pnl_pct >= 0 ? '+' : ''}${m.total_pnl_pct.toFixed(2)}%</td>
         <td>${m.profit_factor === 'Infinity' ? '∞' : m.profit_factor}</td>
-        <td class="neg">-${m.max_drawdown_pct ? m.max_drawdown_pct.toFixed(2) : m.max_drawdown.toFixed(4)}</td>
+        <td class="neg">-${m.max_drawdown_pct ? m.max_drawdown_pct.toFixed(2) : m.max_drawdown.toFixed(2)}</td>
         <td class="pos">+${m.avg_win_pct.toFixed(2)}%</td>
         <td class="neg">${m.avg_loss_pct.toFixed(2)}%</td>
         <td class="${m.expectancy_pct >= 0 ? 'pos' : 'neg'}">${m.expectancy_pct >= 0 ? '+' : ''}${m.expectancy_pct.toFixed(2)}%</td>`;
@@ -874,8 +890,8 @@
       const div = document.createElement('div');
       div.innerHTML = `<div style="background:#16213e;padding:8px 12px;border-radius:6px;border-left:3px solid #2196F3;">
         <div style="font-size:11px;color:#888;">${m.variant_name}</div>
-        <div>LONG: <span class="${m.long_winrate >= 50 ? 'pos' : 'neg'}">${m.long_winrate}%</span> (${m.long_trades} trades)</div>
-        <div>SHORT: <span class="${m.short_winrate >= 50 ? 'pos' : 'neg'}">${m.short_winrate}%</span> (${m.short_trades} trades)</div>
+        <div>LONG: <span class="${m.long_winrate >= 50 ? 'pos' : 'neg'}">${m.long_winrate.toFixed(2)}%</span> (${m.long_trades} trades)</div>
+        <div>SHORT: <span class="${m.short_winrate >= 50 ? 'pos' : 'neg'}">${m.short_winrate.toFixed(2)}%</span> (${m.short_trades} trades)</div>
       </div>`;
       sideStats.appendChild(div);
     });
@@ -902,11 +918,11 @@
       Object.keys(bySymbol).sort((a, b) => bySymbol[b].pnl_pct - bySymbol[a].pnl_pct).forEach(sym => {
         const d = bySymbol[sym];
         const total = d.wins + d.losses;
-        const wr = total > 0 ? Math.round((d.wins / total) * 100) : 0;
+        const wr = total > 0 ? (d.wins / total) * 100 : 0;
         const variantInfo = d.variant ? ' <span style="color:#888;font-size:10px;">(' + d.variant + ')</span>' : '';
         const tr = document.createElement('tr');
         tr.innerHTML = '<td>' + sym + variantInfo + '</td><td>' + total + '</td>' +
-          '<td class="' + (wr >= 50 ? 'pos' : 'neg') + '">' + wr + '%</td>' +
+          '<td class="' + (wr >= 50 ? 'pos' : 'neg') + '">' + wr.toFixed(2) + '%</td>' +
           '<td class="' + (d.pnl_pct >= 0 ? 'pos' : 'neg') + '">' + (d.pnl_pct >= 0 ? '+' : '') + d.pnl_pct.toFixed(2) + '%</td>';
         symbolBody.appendChild(tr);
       });
@@ -991,7 +1007,7 @@
         indexAxis: 'y',
         scales: {
           x: { ticks: { color: '#888', callback: v => v + '%' }, grid: { color: '#222' } },
-          y: { ticks: { color: '#ccc', font: { size: 11 } }, grid: { display: false } },
+          y: { ticks: { color: '#ccc', font: { size: 11 }, autoSkip: false }, grid: { display: false } },
         },
         plugins: {
           legend: { display: false },
