@@ -678,9 +678,8 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
 
         by_variant: dict[str, list] = {}
         for r in all_results:
-            if r.trade is not None:
-                key = f"{r.variant.id}|{r.method}"
-                by_variant.setdefault(key, []).append((r, r.method_label))
+            key = f"{r.variant.id}|{r.method}"
+            by_variant.setdefault(key, []).append((r, r.method_label))
 
         metrics = compute_all_metrics_by_key(by_variant)
 
@@ -712,6 +711,7 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
                     "short_trades": m.short_trades,
                     "long_winrate": round(m.long_winrate, 1),
                     "short_winrate": round(m.short_winrate, 1),
+                    "no_entry": m.no_entry,
                     "equity_curve": m.equity_curve,
                     "equity_curve_pct": m.equity_curve_pct,
                 }
@@ -735,9 +735,16 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
                     "variant_id": r.variant.id,
                     "variant_name": r.variant.name,
                     "confirmation_method": r.method,
+                    "trailing_stop_pct": str(r.variant.trailing_stop_pct) if r.variant.trailing_stop_pct is not None else None,
+                    "trailing_activation_pct": str(r.variant.trailing_activation_pct) if r.variant.trailing_activation_pct is not None else None,
+                    "trailing_update_threshold_pct": str(r.variant.trailing_update_threshold_pct) if r.variant.trailing_update_threshold_pct is not None else None,
+                    "trailing_tp_only": r.variant.trailing_tp_only,
+                    "breakeven_trigger_pct": str(r.variant.breakeven_trigger_pct) if r.variant.breakeven_trigger_pct is not None else None,
+                    "breakeven_lock_pct": str(r.variant.breakeven_lock_pct) if r.variant.breakeven_lock_pct is not None else None,
+                    "partial_close_pct": str(r.variant.partial_close_pct) if r.variant.partial_close_pct is not None else None,
+                    "partial_close_rr": str(r.variant.partial_close_rr) if r.variant.partial_close_rr is not None else None,
                 }
                 for r in all_results
-                if r.trade is not None
             ],
             "signals_count": len(all_signals),
             "entry_type": request.entry_type,

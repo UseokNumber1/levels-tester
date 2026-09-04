@@ -770,9 +770,10 @@
     const m = { variant_id: variantId, variant_name: variantName };
     if (!trades.length) return m;
     m.total_trades = trades.length;
-    let wins = 0, losses = 0, totalPnlPct = 0, winPctSum = 0, lossPnlPctSum = 0;
+    let wins = 0, losses = 0, noEntry = 0, totalPnlPct = 0, winPctSum = 0, lossPnlPctSum = 0;
     let maxDd = 0, peak = 0, equity = 0;
     trades.forEach(t => {
+      if (t.exit_reason === 'no_entry') { noEntry++; return; }
       const pct = t.pnl_pct || 0;
       totalPnlPct += pct;
       equity += pct;
@@ -784,9 +785,10 @@
     });
     m.wins = wins;
     m.losses = losses;
-    m.winrate = wins / trades.length * 100;
+    m.no_entry = noEntry;
+    m.winrate = trades.length - noEntry > 0 ? wins / (trades.length - noEntry) * 100 : 0;
     m.total_pnl_pct = totalPnlPct;
-    m.avg_pnl_pct = totalPnlPct / trades.length;
+    m.avg_pnl_pct = trades.length - noEntry > 0 ? totalPnlPct / (trades.length - noEntry) : 0;
     m.avg_win_pct = winPctSum / wins || 0;
     m.avg_loss_pct = lossPnlPctSum / losses || 0;
     const absLosses = Math.abs(lossPnlPctSum);
@@ -794,15 +796,19 @@
     const wr = m.winrate / 100;
     m.expectancy_pct = wr * m.avg_win_pct + (1 - wr) * m.avg_loss_pct;
     m.max_drawdown = maxDd;
-    m.long_trades = trades.filter(t => t.side === 'LONG').length;
-    m.short_trades = trades.filter(t => t.side === 'SHORT').length;
+    m.long_trades = trades.filter(t => t.side === 'LONG' && t.exit_reason !== 'no_entry').length;
+    m.short_trades = trades.filter(t => t.side === 'SHORT' && t.exit_reason !== 'no_entry').length;
     const longWins = trades.filter(t => t.side === 'LONG' && t.pnl_pct > 0).length;
     const shortWins = trades.filter(t => t.side === 'SHORT' && t.pnl_pct > 0).length;
     m.long_winrate = m.long_trades ? longWins / m.long_trades * 100 : 0;
     m.short_winrate = m.short_trades ? shortWins / m.short_trades * 100 : 0;
     m.equity_curve_pct = [0];
     let eq = 0;
-    trades.forEach(t => { eq += (t.pnl_pct || 0); m.equity_curve_pct.push(eq); });
+    trades.forEach(t => {
+      if (t.exit_reason === 'no_entry') { m.equity_curve_pct.push(eq); return; }
+      eq += (t.pnl_pct || 0);
+      m.equity_curve_pct.push(eq);
+    });
     return m;
   }
 
@@ -872,6 +878,7 @@
       if (m.total_pnl_pct === bestPnl) tr.className = 'best';
       tr.innerHTML = `<td>${m.variant_name}</td>
         <td>${m.total_trades}</td>
+        <td style="color:#888;">${m.no_entry || 0}</td>
         <td class="${m.winrate >= 50 ? 'pos' : 'neg'}">${m.winrate.toFixed(2)}%</td>
         <td class="${m.total_pnl_pct >= 0 ? 'pos' : 'neg'}">${m.total_pnl_pct >= 0 ? '+' : ''}${m.total_pnl_pct.toFixed(2)}%</td>
         <td>${m.profit_factor === 'Infinity' ? '∞' : m.profit_factor}</td>
@@ -1054,27 +1061,55 @@
     if (sym) filtered = filtered.filter(t => t.symbol === sym);
     if (side) filtered = filtered.filter(t => t.side === side);
     if (result === 'win') filtered = filtered.filter(t => t.pnl_pct > 0);
-    if (result === 'loss') filtered = filtered.filter(t => t.pnl_pct <= 0);
+    if (result === 'loss') filtered = filtered.filter(t => t.pnl_pct < 0);
+    if (result === 'no_entry') filtered = filtered.filter(t => t.exit_reason === 'no_entry');
     if (varId) filtered = filtered.filter(t => t.variant_id === varId);
     if (method !== '') filtered = filtered.filter(t => String(t.confirmation_method) === method);
     displayTrades(filtered);
   }
 
-  function displayTrades(trades) {
+  function openReplayForTrade(trade) {
+  const params = new URLSearchParams({
+    symbol: trade.symbol,
+    display_from: trade.entry_time ? trade.entry_time.split('T')[0] : '',
+    side: trade.side,
+    entry_price: trade.entry_price,
+    stop_price: trade.stop_price,
+    take_price: trade.take_price,
+    variant_id: trade.variant_id,
+    variant_name: trade.variant_name,
+    confirmation_method: trade.confirmation_method,
+    trailing_stop_pct: trade.trailing_stop_pct || '',
+    trailing_activation_pct: trade.trailing_activation_pct || '',
+    trailing_update_threshold_pct: trade.trailing_update_threshold_pct || '',
+    trailing_tp_only: trade.trailing_tp_only || false,
+    breakeven_trigger_pct: trade.breakeven_trigger_pct || '',
+    breakeven_lock_pct: trade.breakeven_lock_pct || '',
+    partial_close_pct: trade.partial_close_pct || '',
+    partial_close_rr: trade.partial_close_rr || '',
+  });
+  window.open(`/?${params}`, '_blank');
+}
+
+function displayTrades(trades) {
     const tbody = document.getElementById('bt-trades-body');
     tbody.innerHTML = '';
     trades.forEach((t, i) => {
       const methodLabels = {0: 'Touch', 1: '1 bar', 2: '2 bars'};
       const methodLabel = methodLabels[t.confirmation_method] || '-';
       const tr = document.createElement('tr');
+      const isNoEntry = t.exit_reason === 'no_entry';
+      tr.style.cursor = 'pointer';
+      tr.title = 'Double-click to open replay with this trade';
+      tr.addEventListener('dblclick', () => openReplayForTrade(t));
       tr.innerHTML = `<td>${i + 1}</td>
         <td>${t.symbol}</td>
-        <td class="${t.side === 'LONG' ? 'pos' : 'neg'}">${t.side}</td>
+        <td class="${isNoEntry ? '' : (t.side === 'LONG' ? 'pos' : 'neg')}">${t.side}</td>
         <td>${t.entry_price}</td>
-        <td>${t.exit_price || '-'}</td>
-        <td class="${t.pnl_pct >= 0 ? 'pos' : 'neg'}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
-        <td>${t.bars_held}</td>
-        <td>${t.exit_reason || '-'}</td>
+        <td>${isNoEntry ? '-' : (t.exit_price || '-')}</td>
+        <td class="${isNoEntry ? '' : (t.pnl_pct >= 0 ? 'pos' : 'neg')}">${isNoEntry ? '0.00%' : (t.pnl_pct >= 0 ? '+' : '') + t.pnl_pct.toFixed(2) + '%'}</td>
+        <td>${isNoEntry ? '-' : t.bars_held}</td>
+        <td>${isNoEntry ? 'no entry' : (t.exit_reason || '-')}</td>
         <td style="font-size:11px;color:#888;">${methodLabel}</td>
         <td style="font-size:11px;color:#888;">${t.variant_name}</td>`;
       tbody.appendChild(tr);

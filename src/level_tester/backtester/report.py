@@ -132,7 +132,7 @@ tr:hover {{ background: #1a1a2e; }}
   <table id="summary-table">
     <thead>
       <tr>
-        <th>Variant</th><th>Trades</th><th>Winrate</th><th>PnL</th>
+        <th>Variant</th><th>Trades</th><th>No Entry</th><th>Winrate</th><th>PnL</th>
         <th>PF</th><th>Max DD</th><th>Avg Win</th><th>Avg Loss</th>
         <th>Expectancy</th><th>Avg Bars</th>
       </tr>
@@ -227,6 +227,7 @@ function showTab(name) {{
     tr.innerHTML = `
       <td><b>${{m.variant_name}}</b></td>
       <td>${{m.total_trades}}</td>
+      <td style="color:#888;">${{m.no_entry || 0}}</td>
       <td>${{m.winrate.toFixed(1)}}%</td>
       <td class="${{m.total_pnl >= 0 ? 'pos' : 'neg'}}">${{Number(m.total_pnl).toFixed(2)}}</td>
       <td>${{pf}}</td>
@@ -240,8 +241,8 @@ function showTab(name) {{
 
   // Side cards
   const sideDiv = document.getElementById('side-cards');
-  const longT = allTrades.filter(t => t.side === 'LONG');
-  const shortT = allTrades.filter(t => t.side === 'SHORT');
+  const longT = allTrades.filter(t => t.side === 'LONG' && t.exit_reason !== 'no_entry');
+  const shortT = allTrades.filter(t => t.side === 'SHORT' && t.exit_reason !== 'no_entry');
   const longWins = longT.filter(t => (t.pnl || 0) > 0).length;
   const shortWins = shortT.filter(t => (t.pnl || 0) > 0).length;
   sideDiv.innerHTML = `
@@ -256,6 +257,7 @@ function showTab(name) {{
   allTrades.forEach(t => {{
     if (!bySym[t.symbol]) bySym[t.symbol] = {{trades:0, wins:0, pnl:0}};
     bySym[t.symbol].trades++;
+    if (t.exit_reason === 'no_entry') return;
     if ((t.pnl || 0) > 0) bySym[t.symbol].wins++;
     bySym[t.symbol].pnl += (t.pnl || 0);
   }});
@@ -497,8 +499,6 @@ def _build_trade_rows(results: list[TradeResult]) -> str:
     """Build JSON array of trade objects for JS."""
     rows = []
     for r in results:
-        if r.trade is None:
-            continue
         t = r.trade
         rows.append({
             "signal_id": r.signal.signal_id,
@@ -543,6 +543,7 @@ def _build_metrics_json(metrics: list[VariantMetrics]) -> str:
             "short_trades": m.short_trades,
             "long_winrate": m.long_winrate,
             "short_winrate": m.short_winrate,
+            "no_entry": m.no_entry,
         })
     return json.dumps(data)
 

@@ -175,15 +175,14 @@ def main() -> None:
     # Group trades by variant
     by_variant: dict[str, list] = {}
     for r in results:
-        if r.trade is not None:
-            by_variant.setdefault(r.variant.id, []).append(r.trade)
+        by_variant.setdefault(r.variant.id, []).append(r.trade)
 
     metrics = compute_all_metrics(by_variant)
 
     # Print summary
     print("\n" + "=" * 80)
     print(f"  BACKTEST RESULTS — Entry: {args.entry.upper()}")
-    print(f"  Signals: {len(signals)} | Trades: {len(results)} | Closed: {sum(1 for r in results if r.trade and r.trade.status == 'closed')}")
+    print(f"  Signals: {len(signals)} | Trades: {len(results)} | Closed: {sum(1 for r in results if r.trade and r.trade.status == 'closed')} | No entry: {sum(1 for r in results if r.trade and r.trade.exit_reason == 'no_entry')}")
     print("=" * 80)
     print(f"  {'Variant':20s} {'Trades':>6s} {'Winrate':>8s} {'PnL':>8s} {'PF':>6s} {'MaxDD':>8s}")
     print("  " + "-" * 62)

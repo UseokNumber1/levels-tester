@@ -29,6 +29,7 @@ class VariantMetrics:
     expectancy: Decimal = Decimal(0)
     expectancy_pct: Decimal = Decimal(0)
     avg_bars_held: float = 0.0
+    no_entry: int = 0
     # By side
     long_trades: int = 0
     short_trades: int = 0
@@ -72,9 +73,17 @@ def compute_metrics(variant_id: str, variant_name: str, trades: list[BacktestTra
         pnl_pct = t.pnl_pct or Decimal(0)
         pnl_f = float(pnl)
         pnl_pct_f = float(pnl_pct)
+        bars.append(t.bars_held)
+
+        # No-entry signals: pnl=0, skip from wins/losses/equity
+        if t.exit_reason == "no_entry":
+            m.no_entry += 1
+            pnls.append(Decimal(0))
+            pnl_pcts.append(Decimal(0))
+            continue
+
         pnls.append(pnl)
         pnl_pcts.append(pnl_pct)
-        bars.append(t.bars_held)
 
         # Side stats
         if t.side == "LONG":
@@ -112,15 +121,17 @@ def compute_metrics(variant_id: str, variant_name: str, trades: list[BacktestTra
     m.equity_curve_pct = equity_curve_pct
     m.total_pnl = sum(pnls)
     m.total_pnl_pct = sum(pnl_pcts)
-    m.avg_pnl = m.total_pnl / m.total_trades if m.total_trades else Decimal(0)
-    m.avg_pnl_pct = m.total_pnl_pct / m.total_trades if m.total_trades else Decimal(0)
+    real_trades = m.total_trades - m.no_entry
+    m.avg_pnl = m.total_pnl / real_trades if real_trades else Decimal(0)
+    m.avg_pnl_pct = m.total_pnl_pct / real_trades if real_trades else Decimal(0)
     m.avg_win = sum(wins_list) / len(wins_list) if wins_list else Decimal(0)
     m.avg_win_pct = sum(wins_pct_list) / len(wins_pct_list) if wins_pct_list else Decimal(0)
     m.avg_loss = sum(losses_list) / len(losses_list) if losses_list else Decimal(0)
     m.avg_loss_pct = sum(losses_pct_list) / len(losses_pct_list) if losses_pct_list else Decimal(0)
-    m.winrate = m.wins / m.total_trades * 100 if m.total_trades else 0.0
+    m.winrate = m.wins / real_trades * 100 if real_trades else 0.0
     m.max_drawdown = Decimal(str(max_dd))
-    m.avg_bars_held = sum(bars) / len(bars) if bars else 0.0
+    real_bars = [b for b, t in zip(bars, trades) if t.exit_reason != "no_entry"]
+    m.avg_bars_held = sum(real_bars) / len(real_bars) if real_bars else 0.0
 
     # Profit Factor
     abs_losses = sum(abs(x) for x in losses_list)
@@ -168,7 +179,7 @@ def compute_all_metrics_by_key(
     metrics = []
     for key, pairs in results_by_key.items():
         method_label = pairs[0][1] if pairs else ""
-        trades = [p[0].trade for p in pairs if p[0].trade is not None]
+        trades = [p[0].trade for p in pairs]
         if not trades:
             continue
         variant_id = pairs[0][0].variant.id

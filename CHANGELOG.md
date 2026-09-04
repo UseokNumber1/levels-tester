@@ -1,6 +1,27 @@
 # Changelog
 
-## v1.0.0 (2026-09-03)
+## v1.0.1 (2026-09-04)
+
+### Fixed
+- **Breakeven not working**: Fixed critical bug where breakeven stop was being overwritten with original stop price, making breakeven ineffective (`trade_model.py:127-128`)
+- **No-entry signals counted as losses**: Signals without entry confirmation are now tracked separately with `pnl=0` instead of being filtered out or counted as losses
+- **Winrate calculation**: Now excludes no-entry signals from denominator, showing true winrate of executed trades
+- **Version consistency**: Updated `pyproject.toml` version to match `VERSION` file (1.0.0), index.html now reads version dynamically from API
+
+### Added
+- **Trade visual mode**: Double-click any trade in backtest "All Trades" table to open replay window with trade parameters pre-filled (symbol, date, entry/SL/TP, trailing, breakeven)
+- **Visual trade levels on chart**: Entry (green), Stop Loss (red), Take Profit (blue), Trailing activation (orange dashed), Breakeven (yellow dashed) displayed as price lines
+- **Auto-open detail chart**: When replay cursor approaches entry price ±0.5%, detail chart (M1/M5) automatically opens for visual verification
+- **No-entry tracking**: Added `no_entry` counter in metrics, trades table, and CLI reports; "No Entry" filter in backtest UI
+- **Variant parameters in trade data**: Trailing, breakeven, and partial close parameters now included in backtest results for visual mode
+
+### Changed
+- **Loss filter**: Now `pnl < 0` (excludes `pnl=0` no-entry trades)
+- **Equity curve**: Skips no-entry trades
+- **Side winrates**: Exclude no-entry trades
+- **CLI backtest output**: Shows "No entry: N" count in summary
+- **HTML report**: Added "No Entry" column, excludes no-entry from side/symbol winrates
+- **Dynamic version in index.html**: Page title and header version now fetched from `/api/version`
 
 ### Fixed
 

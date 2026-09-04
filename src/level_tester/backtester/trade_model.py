@@ -124,8 +124,6 @@ class BacktestTrade:
                 effective_stop = self.trailing_current_stop
             elif not is_long and self.trailing_current_stop < effective_stop:
                 effective_stop = self.trailing_current_stop
-        if self.breakeven_active and self.original_stop_price is not None:
-            effective_stop = self.original_stop_price
 
         # --- 6. Check Stop Loss ---
         if is_long:

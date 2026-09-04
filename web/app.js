@@ -109,6 +109,94 @@ function isoInput(value) {
 }
 $('display-from').value = isoInput(new Date(Date.now() - 7 * 86400000));
 
+// Parse URL parameters for trade visual mode (from backtest double-click)
+function parseTradeVisualParams() {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (!urlParams.has('symbol')) return null;
+  
+  const params = {
+    symbol: urlParams.get('symbol'),
+    display_from: urlParams.get('display_from') || '',
+    side: urlParams.get('side') || 'LONG',
+    entry_price: Number(urlParams.get('entry_price')) || 0,
+    stop_price: Number(urlParams.get('stop_price')) || 0,
+    take_price: Number(urlParams.get('take_price')) || 0,
+    variant_id: urlParams.get('variant_id') || '',
+    variant_name: urlParams.get('variant_name') || '',
+    confirmation_method: Number(urlParams.get('confirmation_method')) || 2,
+    trailing: {
+      trailing_stop_pct: Number(urlParams.get('trailing_stop_pct')) || 0,
+      trailing_activation_pct: Number(urlParams.get('trailing_activation_pct')) || 0,
+      trailing_update_threshold_pct: Number(urlParams.get('trailing_update_threshold_pct')) || 0,
+      trailing_tp_only: urlParams.get('trailing_tp_only') === 'true',
+    },
+    breakeven: {
+      breakeven_trigger_pct: Number(urlParams.get('breakeven_trigger_pct')) || 0,
+      breakeven_lock_pct: Number(urlParams.get('breakeven_lock_pct')) || 0,
+    },
+    partial: {
+      partial_close_pct: Number(urlParams.get('partial_close_pct')) || 0,
+      partial_close_rr: Number(urlParams.get('partial_close_rr')) || 0,
+    },
+  };
+  return params;
+}
+
+// Apply trade visual params to form
+function applyTradeVisualParams(params) {
+  if (!params) return;
+  
+  // Set symbol - will be applied when instruments are loaded
+  state.pendingTradeSymbol = params.symbol;
+  if (params.display_from) {
+    $('display-from').value = params.display_from;
+  }
+  
+  // Set confirmation method
+  const methodRadio = document.querySelector(`input[name="confirmation-method"][value="${params.confirmation_method}"]`);
+  if (methodRadio) methodRadio.checked = true;
+  
+  // Show visual mode indicator
+  showTradeVisualIndicator(params);
+}
+
+// Apply pending symbol after instruments are loaded
+function applyPendingTradeSymbol() {
+  if (state.pendingTradeSymbol) {
+    $('symbol').value = state.pendingTradeSymbol;
+    state.pendingTradeSymbol = null;
+  }
+}
+
+// Show indicator that we're in trade visual mode
+function showTradeVisualIndicator(params) {
+  const existing = document.getElementById('trade-visual-indicator');
+  if (existing) existing.remove();
+  
+  const indicator = document.createElement('div');
+  indicator.id = 'trade-visual-indicator';
+  indicator.style.cssText = 'background:#1a2a4a;border:1px solid #2196F3;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px;color:#fff;display:flex;align-items:center;gap:10px;';
+  indicator.innerHTML = `
+    <span style="color:#2196F3;font-weight:bold;">📊 Trade Visual Mode</span>
+    <span>${params.variant_name || params.variant_id}</span>
+    <span>${params.side} | Entry: ${params.entry_price} | SL: ${params.stop_price} | TP: ${params.take_price}</span>
+    <button onclick="clearTradeVisualMode()" style="margin-left:auto;background:none;border:none;color:#888;cursor:pointer;font-size:14px;">✕</button>
+  `;
+  const controlPanel = document.querySelector('.control-panel');
+  controlPanel.insertBefore(indicator, controlPanel.firstChild);
+}
+
+// Clear trade visual mode
+function clearTradeVisualMode() {
+  const indicator = document.getElementById('trade-visual-indicator');
+  if (indicator) indicator.remove();
+  state.tradeVisualParams = null;
+  clearTradeLevelLines();
+}
+
+// Make clearTradeVisualMode global for onclick
+window.clearTradeVisualMode = clearTradeVisualMode;
+
 function formatVolume(vol) {
   const n = Number(vol);
   if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
@@ -151,6 +239,7 @@ async function loadInstruments(force = false) {
       ? data.items.map(item => `<option value="${item.symbol}">${item.symbol} · ${formatVolume(item.daily_volume_usdt)}</option>`).join('')
       : '<option>No instruments</option>';
     $('instrument-info').textContent = `${data.count} USDT instruments`;
+    applyPendingTradeSymbol();
   } catch (error) { $('instrument-info').textContent = error.message; }
 }
 
@@ -279,9 +368,28 @@ function syncChartToCursor(snapshot) {
 
   state.chartHasData = bars.length > 0;
 
-  renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
+renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
   renderDetailLevelLines(snapshot.levels.filter(isConfirmedLevel));
-
+  
+  // Render trade visual levels (entry, SL, TP, trailing, BE)
+  if (state.tradeVisualParams) {
+    renderTradeLevels(state.tradeVisualParams);
+    
+    // Auto-open detail chart when price approaches entry ±0.5%
+    if (snapshot.cursor && !state.detailActive) {
+      const cursorClose = Number(snapshot.cursor.close);
+      const entryPrice = state.tradeVisualParams.entry_price;
+      if (entryPrice > 0) {
+        const distancePct = Math.abs(cursorClose - entryPrice) / entryPrice * 100;
+        if (distancePct <= 0.5) {
+          state.detailActive = true;
+          initDetailChart();
+          syncDetail(snapshot);
+        }
+      }
+    }
+  }
+  
   setPivotMarkers(snapshot.pivots.map(pivot => ({
     time: Math.floor(new Date(pivot.pivot_time).getTime() / 1000),
     position: pivot.kind === 'high' ? 'aboveBar' : 'belowBar',
@@ -300,6 +408,94 @@ function clearDetailLevelLines() {
   if (!state.detailSeries) return;
   state.detailLevelLines.forEach(line => state.detailSeries.removePriceLine(line));
   state.detailLevelLines = [];
+}
+
+function clearTradeLevelLines() {
+  if (!state.candleSeries || !state.tradeLevelLines) return;
+  state.tradeLevelLines.forEach(line => state.candleSeries.removePriceLine(line));
+  state.tradeLevelLines = [];
+}
+
+function renderTradeLevels(params) {
+  if (!params || !state.candleSeries) return;
+  clearTradeLevelLines();
+  
+  const isLong = params.side === 'LONG';
+  const colorEntry = '#4CAF50';
+  const colorSL = '#f44336';
+  const colorTP = '#2196F3';
+  const colorTrail = '#FF9800';
+  const colorBE = '#FFEB3B';
+  
+  // Entry line (solid green)
+  state.tradeLevelLines.push(
+    state.candleSeries.createPriceLine({
+      price: params.entry_price,
+      color: colorEntry,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'Entry',
+    })
+  );
+  
+  // Stop Loss (red)
+  state.tradeLevelLines.push(
+    state.candleSeries.createPriceLine({
+      price: params.stop_price,
+      color: colorSL,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'SL',
+    })
+  );
+  
+  // Take Profit (blue)
+  state.tradeLevelLines.push(
+    state.candleSeries.createPriceLine({
+      price: params.take_price,
+      color: colorTP,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'TP',
+    })
+  );
+  
+  // Trailing Stop activation (dashed orange) - if trailing params exist
+  if (params.trailing?.trailing_stop_pct && params.trailing?.trailing_activation_pct) {
+    const trailActivation = isLong
+      ? params.entry_price * (1 + params.trailing.trailing_activation_pct / 100)
+      : params.entry_price * (1 - params.trailing.trailing_activation_pct / 100);
+    state.tradeLevelLines.push(
+      state.candleSeries.createPriceLine({
+        price: trailActivation,
+        color: colorTrail,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: 'Trail Activate',
+      })
+    );
+  }
+  
+  // Breakeven (dashed yellow) - if breakeven params exist
+  if (params.breakeven?.breakeven_trigger_pct && params.breakeven?.breakeven_lock_pct) {
+    const beLevel = isLong
+      ? params.entry_price * (1 + params.breakeven.breakeven_lock_pct / 100)
+      : params.entry_price * (1 - params.breakeven.breakeven_lock_pct / 100);
+    state.tradeLevelLines.push(
+      state.candleSeries.createPriceLine({
+        price: beLevel,
+        color: colorBE,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: 'BE',
+      })
+    );
+  }
 }
 
 function renderDetailLevelLines(levels) {
@@ -866,6 +1062,12 @@ async function animateDetailCandles(candles, startMs, endMs, activeSetup, snapsh
 }
 
 checkServer();
-loadReplayConfig();
+loadReplayConfig().then(() => {
+  const tradeParams = parseTradeVisualParams();
+  if (tradeParams) {
+    applyTradeVisualParams(tradeParams);
+    state.tradeVisualParams = tradeParams;
+  }
+});
 loadInstruments(false);
 setInterval(checkServer, 5000);

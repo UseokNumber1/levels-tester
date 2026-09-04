@@ -94,10 +94,21 @@ class BacktestEngine:
 
         if entry is None:
             for variant in variants:
+                no_entry_trade = BacktestTrade(
+                    id=f"{signal.signal_id}_{variant.id}",
+                    side=signal.side,
+                    entry_time=signal_time,
+                    entry_price=signal.entry_price,
+                    stop_price=signal.entry_price,
+                    take_price=signal.entry_price,
+                    status="closed",
+                    exit_reason="no_entry",
+                    pnl=Decimal(0),
+                    pnl_pct=Decimal(0),
+                )
                 results.append(TradeResult(
                     signal=signal, variant=variant, entry_type=entry_type,
-                    entry=None, trade=None, candles_used=len(candles),
-                    error="entry not triggered",
+                    entry=None, trade=no_entry_trade, candles_used=len(candles),
                 ))
             return results
 

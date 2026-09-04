@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Levels Tester v0.4.7</title>
+  <title>Levels Tester</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version">v0.4.7</span></h1></div>
+    <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version" id="app-version"></span></h1></div>
     <div class="server-status"><span id="server-dot" class="dot pending"></span><span id="server-status">CHECKING SERVER</span><div id="run-status" class="status">NO RUN</div></div>
   </header>
   <main class="shell">
@@ -64,5 +64,12 @@
     </section>
   </main>
   <script src="/static/app.js"></script>
+  <script>
+    fetch('/api/version').then(r => r.json()).then(d => {
+      const el = document.getElementById('app-version');
+      if (el) el.textContent = 'v' + d.version;
+      document.title = 'Levels Tester v' + d.version;
+    });
+  </script>
 </body>
 </html>
