@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Levels Tester — Visual Check</title>
+  <link rel="stylesheet" href="/static/styles.css?v=1.0.3">
+  <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><span class="eyebrow">HISTORICAL REPLAY / BINANCE USDT-M</span><h1>Levels Tester <span class="version" id="app-version"></span></h1></div>
+    <div class="server-status"><span id="server-dot" class="dot pending"></span><span id="server-status">CHECKING SERVER</span><div id="run-status" class="status">NO RUN</div></div>
+  </header>
+  <main class="shell">
+    <!-- Trade info banner (read-only) -->
+    <section id="trade-info" class="trade-info hidden">
+      <div class="trade-info-row">
+        <span id="trade-symbol" class="trade-symbol"></span>
+        <span id="trade-side" class="trade-side"></span>
+        <span id="trade-entry" class="trade-value"></span>
+        <span id="trade-sl" class="trade-value"></span>
+        <span id="trade-tp" class="trade-value"></span>
+        <span id="trade-method" class="trade-method"></span>
+        <span id="trade-variant" class="trade-variant"></span>
+      </div>
+    </section>
+
+    <section id="loading-bar" class="loading-bar">
+      <div class="loading-progress"><div id="loading-fill" class="loading-fill" style="width: 0%"></div></div>
+      <div class="loading-text"><span id="loading-stage">Preparing...</span><span id="loading-percent">0%</span></div>
+    </section>
+
+    <!-- Controls: Detail TF + Speed -->
+    <section class="control-panel-minimal">
+      <label>Detail TF<select id="detail-tf"><option value="1m">M1</option><option value="5m">M5</option></select></label>
+      <label>Speed<input id="speed" type="range" min="1" max="100" step="1" value="10"><span id="speed-value">10×</span></label>
+    </section>
+
+    <section class="toolbar">
+      <button data-command="play">Play</button><button data-command="pause">Pause</button>
+      <button data-command="step">Step</button><button data-command="reset">Reset</button>
+      <span id="replay-hint" class="replay-hint"></span>
+      <div class="cursor-readout">Cursor <strong id="cursor">not started</strong></div>
+      <div class="replay-progress"><div class="replay-progress-track"><div id="replay-fill" class="replay-progress-fill"></div></div><span id="replay-text" class="replay-progress-text">0 / 0</span></div>
+    </section>
+
+    <section class="grid">
+      <article class="card chart-card"><div class="card-head"><h2>H1 market</h2><span id="bar-count">0 bars</span></div><div id="chart"></div></article>
+      <article class="card detail-chart-card"><div class="card-head"><h2 id="detail-title">Detail M1</h2><span id="detail-status">waiting for touch</span></div><div id="detail-chart" class="detail-waiting">Chart opens on level touch.</div></article>
+      <aside class="card levels-panel"><div class="card-head"><h2>Active levels</h2><span id="level-count">0</span></div><div id="levels" class="level-list empty">Create a replay to inspect levels.</div></aside>
+    </section>
+  </main>
+  <script src="/static/visual.js?v=1.0.3"></script>
+  <script>
+    fetch('/api/version').then(r => r.json()).then(d => {
+      const el = document.getElementById('app-version');
+      if (el) el.textContent = 'v' + d.version;
+      document.title = 'Levels Tester v' + d.version;
+    });
+  </script>
+</body>
+</html>

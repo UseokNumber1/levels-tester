@@ -107,95 +107,8 @@ function isoInput(value) {
   const d = new Date(value);
   return d.toISOString().slice(0, 10);
 }
-$('display-from').value = isoInput(new Date(Date.now() - 7 * 86400000));
-
-// Parse URL parameters for trade visual mode (from backtest double-click)
-function parseTradeVisualParams() {
-  const urlParams = new URLSearchParams(window.location.search);
-  if (!urlParams.has('symbol')) return null;
-  
-  const params = {
-    symbol: urlParams.get('symbol'),
-    display_from: urlParams.get('display_from') || '',
-    side: urlParams.get('side') || 'LONG',
-    entry_price: Number(urlParams.get('entry_price')) || 0,
-    stop_price: Number(urlParams.get('stop_price')) || 0,
-    take_price: Number(urlParams.get('take_price')) || 0,
-    variant_id: urlParams.get('variant_id') || '',
-    variant_name: urlParams.get('variant_name') || '',
-    confirmation_method: Number(urlParams.get('confirmation_method')) || 2,
-    trailing: {
-      trailing_stop_pct: Number(urlParams.get('trailing_stop_pct')) || 0,
-      trailing_activation_pct: Number(urlParams.get('trailing_activation_pct')) || 0,
-      trailing_update_threshold_pct: Number(urlParams.get('trailing_update_threshold_pct')) || 0,
-      trailing_tp_only: urlParams.get('trailing_tp_only') === 'true',
-    },
-    breakeven: {
-      breakeven_trigger_pct: Number(urlParams.get('breakeven_trigger_pct')) || 0,
-      breakeven_lock_pct: Number(urlParams.get('breakeven_lock_pct')) || 0,
-    },
-    partial: {
-      partial_close_pct: Number(urlParams.get('partial_close_pct')) || 0,
-      partial_close_rr: Number(urlParams.get('partial_close_rr')) || 0,
-    },
-  };
-  return params;
-}
-
-// Apply trade visual params to form
-function applyTradeVisualParams(params) {
-  if (!params) return;
-  
-  // Set symbol - will be applied when instruments are loaded
-  state.pendingTradeSymbol = params.symbol;
-  if (params.display_from) {
-    $('display-from').value = params.display_from;
-  }
-  
-  // Set confirmation method
-  const methodRadio = document.querySelector(`input[name="confirmation-method"][value="${params.confirmation_method}"]`);
-  if (methodRadio) methodRadio.checked = true;
-  
-  // Show visual mode indicator
-  showTradeVisualIndicator(params);
-}
-
-// Apply pending symbol after instruments are loaded
-function applyPendingTradeSymbol() {
-  if (state.pendingTradeSymbol) {
-    $('symbol').value = state.pendingTradeSymbol;
-    state.pendingTradeSymbol = null;
-  }
-}
-
-// Show indicator that we're in trade visual mode
-function showTradeVisualIndicator(params) {
-  const existing = document.getElementById('trade-visual-indicator');
-  if (existing) existing.remove();
-  
-  const indicator = document.createElement('div');
-  indicator.id = 'trade-visual-indicator';
-  indicator.style.cssText = 'background:#1a2a4a;border:1px solid #2196F3;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px;color:#fff;display:flex;align-items:center;gap:10px;';
-  indicator.innerHTML = `
-    <span style="color:#2196F3;font-weight:bold;">📊 Trade Visual Mode</span>
-    <span>${params.variant_name || params.variant_id}</span>
-    <span>${params.side} | Entry: ${params.entry_price} | SL: ${params.stop_price} | TP: ${params.take_price}</span>
-    <button onclick="clearTradeVisualMode()" style="margin-left:auto;background:none;border:none;color:#888;cursor:pointer;font-size:14px;">✕</button>
-  `;
-  const controlPanel = document.querySelector('.control-panel');
-  controlPanel.insertBefore(indicator, controlPanel.firstChild);
-}
-
-// Clear trade visual mode
-function clearTradeVisualMode() {
-  const indicator = document.getElementById('trade-visual-indicator');
-  if (indicator) indicator.remove();
-  state.tradeVisualParams = null;
-  clearTradeLevelLines();
-}
-
-// Make clearTradeVisualMode global for onclick
-window.clearTradeVisualMode = clearTradeVisualMode;
+const displayFromEl = $('display-from');
+if (displayFromEl) displayFromEl.value = isoInput(new Date(Date.now() - 7 * 86400000));
 
 function formatVolume(vol) {
   const n = Number(vol);
@@ -231,23 +144,30 @@ async function checkServer() {
 }
 
 async function loadInstruments(force = false) {
-  const params = new URLSearchParams({ search: $('instrument-search').value, limit: '100', refresh: String(force) });
-  if ($('min-volume').value) params.set('min_volume', $('min-volume').value);
+  const searchEl = $('instrument-search');
+  if (!searchEl) return;
+  const params = new URLSearchParams({ search: searchEl.value, limit: '100', refresh: String(force) });
+  const minVolEl = $('min-volume');
+  if (minVolEl && minVolEl.value) params.set('min_volume', minVolEl.value);
   try {
     const data = await request(`/api/instruments?${params}`);
-    $('symbol').innerHTML = data.items.length
+    const symbolEl = $('symbol');
+    const infoEl = $('instrument-info');
+    if (symbolEl) symbolEl.innerHTML = data.items.length
       ? data.items.map(item => `<option value="${item.symbol}">${item.symbol} · ${formatVolume(item.daily_volume_usdt)}</option>`).join('')
       : '<option>No instruments</option>';
-    $('instrument-info').textContent = `${data.count} USDT instruments`;
+    if (infoEl) infoEl.textContent = `${data.count} USDT instruments`;
     applyPendingTradeSymbol();
-  } catch (error) { $('instrument-info').textContent = error.message; }
+  } catch (error) { const infoEl = $('instrument-info'); if (infoEl) infoEl.textContent = error.message; }
 }
 
 function render(snapshot, deferChart = false) {
   state.runId = snapshot.run_id;
   if (Number.isFinite(Number(snapshot.speed))) {
-    $('speed').value = String(snapshot.speed);
-    $('speed-value').textContent = `${snapshot.speed}×`;
+    const speedEl = $('speed');
+    if (speedEl) speedEl.value = String(snapshot.speed);
+    const speedValEl = $('speed-value');
+    if (speedValEl) speedValEl.textContent = `${snapshot.speed}×`;
   }
   const isLoading = snapshot.status === 'loading';
   const wasLoading = state.lastStatus === 'loading';
@@ -297,13 +217,32 @@ function render(snapshot, deferChart = false) {
     <div class="level-meta">${level.state} · ${level.touch_count} touches · zone ${fmtPrice(level.zone_low)}–${fmtPrice(level.zone_high)}</div></div>`).join('')
     : 'No levels confirmed yet.';
 
+  const methodEl = document.getElementById('trade-method');
+  if (methodEl && !methodEl.textContent) {
+    const activeSetup = findActiveSetup(snapshot);
+    if (activeSetup && activeSetup.confirmation_method) {
+      const method = activeSetup.confirmation_method;
+      const reqBars = activeSetup.confirmation_bars || 2;
+      if (method === 'touch') {
+        methodEl.textContent = 'Touch';
+      } else if (method === 'consecutive') {
+        methodEl.textContent = reqBars === 1 ? '1 bar' : '2 bars';
+      } else {
+        methodEl.textContent = method;
+      }
+    } else if (snapshot.confirmation_methods && snapshot.confirmation_methods.length) {
+      methodEl.textContent = snapshot.confirmation_methods.join(', ');
+    }
+  }
+  if (methodEl) console.log('[trade-method]', methodEl.textContent);
+
   if (!isLoading && snapshot.master_candles.length > 0 && !deferChart) {
     state.allCandles = snapshot.master_candles;
     syncChartToCursor(snapshot);
   }
 
   if (wasLoading && !isLoading && snapshot.status === 'ready') {
-    startAutoPlay();
+    // Auto-play starts on first manual Play click (not auto-start)
   }
 }
 
@@ -369,28 +308,9 @@ function syncChartToCursor(snapshot) {
   state.chartHasData = bars.length > 0;
 
 renderLevelLines(snapshot.levels.filter(isConfirmedLevel));
-  renderDetailLevelLines(snapshot.levels.filter(isConfirmedLevel));
-  
-  // Render trade visual levels (entry, SL, TP, trailing, BE)
-  if (state.tradeVisualParams) {
-    renderTradeLevels(state.tradeVisualParams);
-    
-    // Auto-open detail chart when price approaches entry ±0.5%
-    if (snapshot.cursor && !state.detailActive) {
-      const cursorClose = Number(snapshot.cursor.close);
-      const entryPrice = state.tradeVisualParams.entry_price;
-      if (entryPrice > 0) {
-        const distancePct = Math.abs(cursorClose - entryPrice) / entryPrice * 100;
-        if (distancePct <= 0.5) {
-          state.detailActive = true;
-          initDetailChart();
-          syncDetail(snapshot);
-        }
-      }
-    }
-  }
-  
-  setPivotMarkers(snapshot.pivots.map(pivot => ({
+renderDetailLevelLines(snapshot.levels.filter(isConfirmedLevel));
+
+setPivotMarkers(snapshot.pivots.map(pivot => ({
     time: Math.floor(new Date(pivot.pivot_time).getTime() / 1000),
     position: pivot.kind === 'high' ? 'aboveBar' : 'belowBar',
     color: pivot.kind === 'high' ? '#ee6c4d' : '#2166f3',
@@ -408,94 +328,6 @@ function clearDetailLevelLines() {
   if (!state.detailSeries) return;
   state.detailLevelLines.forEach(line => state.detailSeries.removePriceLine(line));
   state.detailLevelLines = [];
-}
-
-function clearTradeLevelLines() {
-  if (!state.candleSeries || !state.tradeLevelLines) return;
-  state.tradeLevelLines.forEach(line => state.candleSeries.removePriceLine(line));
-  state.tradeLevelLines = [];
-}
-
-function renderTradeLevels(params) {
-  if (!params || !state.candleSeries) return;
-  clearTradeLevelLines();
-  
-  const isLong = params.side === 'LONG';
-  const colorEntry = '#4CAF50';
-  const colorSL = '#f44336';
-  const colorTP = '#2196F3';
-  const colorTrail = '#FF9800';
-  const colorBE = '#FFEB3B';
-  
-  // Entry line (solid green)
-  state.tradeLevelLines.push(
-    state.candleSeries.createPriceLine({
-      price: params.entry_price,
-      color: colorEntry,
-      lineWidth: 2,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: 'Entry',
-    })
-  );
-  
-  // Stop Loss (red)
-  state.tradeLevelLines.push(
-    state.candleSeries.createPriceLine({
-      price: params.stop_price,
-      color: colorSL,
-      lineWidth: 2,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: 'SL',
-    })
-  );
-  
-  // Take Profit (blue)
-  state.tradeLevelLines.push(
-    state.candleSeries.createPriceLine({
-      price: params.take_price,
-      color: colorTP,
-      lineWidth: 2,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: 'TP',
-    })
-  );
-  
-  // Trailing Stop activation (dashed orange) - if trailing params exist
-  if (params.trailing?.trailing_stop_pct && params.trailing?.trailing_activation_pct) {
-    const trailActivation = isLong
-      ? params.entry_price * (1 + params.trailing.trailing_activation_pct / 100)
-      : params.entry_price * (1 - params.trailing.trailing_activation_pct / 100);
-    state.tradeLevelLines.push(
-      state.candleSeries.createPriceLine({
-        price: trailActivation,
-        color: colorTrail,
-        lineWidth: 1,
-        lineStyle: 3,
-        axisLabelVisible: true,
-        title: 'Trail Activate',
-      })
-    );
-  }
-  
-  // Breakeven (dashed yellow) - if breakeven params exist
-  if (params.breakeven?.breakeven_trigger_pct && params.breakeven?.breakeven_lock_pct) {
-    const beLevel = isLong
-      ? params.entry_price * (1 + params.breakeven.breakeven_lock_pct / 100)
-      : params.entry_price * (1 - params.breakeven.breakeven_lock_pct / 100);
-    state.tradeLevelLines.push(
-      state.candleSeries.createPriceLine({
-        price: beLevel,
-        color: colorBE,
-        lineWidth: 1,
-        lineStyle: 3,
-        axisLabelVisible: true,
-        title: 'BE',
-      })
-    );
-  }
 }
 
 function renderDetailLevelLines(levels) {
@@ -733,23 +565,35 @@ async function autoPlayStep() {
     if (state.detailEnabled) {
       await syncDetail(snapshot);
     }
+    console.log('[autoPlayStep] seq:', snapshot.cursor ? snapshot.cursor.sequence : 'no cursor', 'time:', snapshot.cursor ? snapshot.cursor.bar_time : '-', 'events:', snapshot.events.length, 'status:', snapshot.status, 'levels:', (snapshot.levels||[]).length, 'setups:', (snapshot.setups||[]).length);
+    snapshot.events.forEach(e => {
+      console.log('  event:', e.event_type, 'seq:', e.sequence, 'level_id:', e.level_id||'-', 'reason:', e.reason||'-', 'payload:', JSON.stringify(e.payload||{}).slice(0,120));
+    });
+    // trace setups
+    (snapshot.setups||[]).forEach(s => console.log('  setup:', s.id, 'method:', s.confirmation_method, 'status:', s.status, 'touch_time:', s.touch_time, 'entry_time:', s.entry_time||'-'));
+    const currentSeq = snapshot.cursor ? snapshot.cursor.sequence : -1;
     const touchEvent = snapshot.events.find(event =>
-      event.event_type === 'level.touched' &&
-      snapshot.cursor && event.sequence === snapshot.cursor.sequence
+      (event.event_type === 'level.touched' || event.event_type === 'level.broken' || event.event_type === 'level.approaching') &&
+      event.sequence === currentSeq
     );
     if (touchEvent) {
+      console.log('[autoPlayStep] LEVEL TOUCH/BROKEN/APPROACH found:', touchEvent.event_type, 'level_id:', touchEvent.level_id, 'reason:', touchEvent.reason);
       const level = (snapshot.levels || []).find(item => item.id === touchEvent.level_id);
-      const active = level && !['pending_rebound', 'broken', 'expired'].includes(level.state);
+      if (level) console.log('  level state:', level.state, 'side:', level.side, 'price:', level.price, 'touches:', level.touch_count);
+      const active = level && !['expired'].includes(level.state);
       if (active) {
         const touchCandle = snapshot.master_candles.find(item => item.close_time === snapshot.cursor.bar_time);
         state.detailEnabled = true;
         state.detailPrevMs = touchCandle
           ? new Date(touchCandle.open_time).getTime()
           : new Date(snapshot.cursor.bar_time).getTime();
-        openDetailPanel();
+        console.log('[autoPlayStep] -> opening detail chart (level event) startMs:', new Date(state.detailPrevMs).toISOString());
+        await syncDetail(snapshot);
         showHint('⏸ Пауза — активный уровень затронут, нажмите Play или Step для продолжения');
         stopAnimation();
         return;
+      } else {
+        console.log('[autoPlayStep] level NOT active, state:', level?.state);
       }
     }
     if (snapshot.status === 'completed') {
@@ -766,6 +610,7 @@ async function autoPlayStep() {
       && new Date(snapshot.cursor.bar_time).getTime() < state.displayFromMs;
     state.animTimer = setTimeout(autoPlayStep, beforeDisplay ? 0 : stepDelay());
   } catch (error) {
+    console.error('autoPlayStep error:', error);
     stopAnimation();
   }
 }
@@ -811,7 +656,8 @@ async function command(name) {
   } catch (error) { alert(error.message); }
 }
 
-$('create').onclick = async () => {
+const createBtn = $('create');
+if (createBtn) createBtn.onclick = async () => {
   stopAnimation();
   state.lastStatus = null;
   state.drawnTime = undefined;
@@ -825,7 +671,8 @@ $('create').onclick = async () => {
     if (!confirmationMethods.length) {
       throw new Error('Select at least one confirmation method.');
     }
-    const dateStr = $('display-from').value + 'T00:00:00Z';
+    const displayFromVal = $('display-from') ? $('display-from').value : '';
+    const dateStr = displayFromVal + 'T00:00:00Z';
     state.displayFromMs = Date.parse(dateStr);
     const snapshot = await request('/api/runs', {
       method: 'POST',
@@ -861,9 +708,12 @@ $('speed').onchange = async () => {
   }
 };
 
-$('refresh-instruments').onclick = () => loadInstruments(true);
-$('instrument-search').onchange = () => loadInstruments(false);
-$('min-volume').onchange = () => loadInstruments(false);
+const refreshInstrumentsEl = $('refresh-instruments');
+if (refreshInstrumentsEl) refreshInstrumentsEl.onclick = () => loadInstruments(true);
+const instrumentSearchEl = $('instrument-search');
+if (instrumentSearchEl) instrumentSearchEl.onchange = () => loadInstruments(false);
+const minVolumeEl = $('min-volume');
+if (minVolumeEl) minVolumeEl.onchange = () => loadInstruments(false);
 
 async function pollRun(runId) {
   for (;;) {
@@ -921,13 +771,14 @@ function initDetailChart() {
 }
 
 function openDetailPanel() {
-  if (state.detailActive) return;
+  if (state.detailActive) { console.log('[detail] already active'); return; }
   state.detailActive = true;
   const container = $('detail-chart');
   container.classList.remove('detail-waiting');
   container.textContent = '';
   initDetailChart();
   $('detail-status').textContent = 'synced with H1';
+  console.log('[detail] panel opened');
 }
 
 function destroyDetailChart() {
@@ -982,8 +833,8 @@ async function syncDetail(snapshot) {
   const cursorMs = new Date(snapshot.cursor.bar_time).getTime();
   state.detailEnabled = true;
   openDetailPanel();
-  const startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
-  if (cursorMs <= startMs) return;
+  let startMs = state.detailPrevMs ?? cursorMs - 3600 * 1000;
+  if (startMs >= cursorMs) startMs = cursorMs - 3600 * 1000;
   const activeSetup = findActiveSetup(snapshot);
   if (activeSetup) state.activeSetupId = activeSetup.id;
   try {
@@ -992,8 +843,6 @@ async function syncDetail(snapshot) {
       end: new Date(cursorMs).toISOString(),
     });
     const data = await request(`/api/runs/${state.runId}/detail?${params}`);
-    // Advance the window before animating so an interrupted animation
-    // never refetches or re-draws the same hour on the next Step.
     state.detailPrevMs = cursorMs;
     await animateDetailCandles(data.detail_candles || [], startMs, cursorMs, activeSetup, snapshot);
   } catch (error) {
@@ -1062,12 +911,6 @@ async function animateDetailCandles(candles, startMs, endMs, activeSetup, snapsh
 }
 
 checkServer();
-loadReplayConfig().then(() => {
-  const tradeParams = parseTradeVisualParams();
-  if (tradeParams) {
-    applyTradeVisualParams(tradeParams);
-    state.tradeVisualParams = tradeParams;
-  }
-});
+loadReplayConfig();
 loadInstruments(false);
 setInterval(checkServer, 5000);

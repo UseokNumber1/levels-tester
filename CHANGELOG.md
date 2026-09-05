@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.2 (2026-09-05)
+
+### Changed
+- Patch version bump (1.0.1 → 1.0.2)
+- Synced `pyproject.toml` version with `VERSION` file
+- Visual mode refinements in `src/level_tester/api/app.py`, `web/app.js`, `web/backtest.js`, `web/styles.css`
+
 ## v1.0.1 (2026-09-04)
 
 ### Fixed

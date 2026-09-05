@@ -1069,6 +1069,7 @@
   }
 
   function openReplayForTrade(trade) {
+  const methodLabels = {0: 'Touch', 1: '1 bar', 2: '2 bars'};
   const params = new URLSearchParams({
     symbol: trade.symbol,
     display_from: trade.entry_time ? trade.entry_time.split('T')[0] : '',
@@ -1078,7 +1079,7 @@
     take_price: trade.take_price,
     variant_id: trade.variant_id,
     variant_name: trade.variant_name,
-    confirmation_method: trade.confirmation_method,
+    confirmation_method: methodLabels[trade.confirmation_method] || '',
     trailing_stop_pct: trade.trailing_stop_pct || '',
     trailing_activation_pct: trade.trailing_activation_pct || '',
     trailing_update_threshold_pct: trade.trailing_update_threshold_pct || '',
@@ -1088,7 +1089,7 @@
     partial_close_pct: trade.partial_close_pct || '',
     partial_close_rr: trade.partial_close_rr || '',
   });
-  window.open(`/?${params}`, '_blank');
+  window.open(`/visual?${params}`, '_blank');
 }
 
 function displayTrades(trades) {

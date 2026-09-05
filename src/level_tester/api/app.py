@@ -216,6 +216,11 @@ async def backtest_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "backtest.html")
 
 
+@app.get("/visual", include_in_schema=False)
+async def visual_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "visual.html")
+
+
 @app.post("/api/instruments/sync")
 async def sync_instruments() -> dict[str, Any]:
     try:
