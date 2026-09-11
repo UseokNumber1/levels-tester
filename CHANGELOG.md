@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.1 (2026-09-11)
+
+### Added
+- **Potential PnL on every HourBounce chart** (`src/level_tester/api/app.py`, `web/hourbounce.js`): `_hb_result_json` returns side-signed `pnl_pct`; single review shows `PnL … · R …` in result line + leading `PnL` metric; matrix 3×3 footers show `in · out · R · PnL +x.xx%` (green/red); export HTML cards include `PnL`; stale cached cells backfilled via `_hb_cell_pnl`
+- **Real archive PnL in selection column** (`src/level_tester/api/app.py`, `web/hourbounce.js`): `/api/hourbounce/signals` returns `entry_arch/exit_arch/pnl_arch/pnl_pct_arch/real_trade`; signal list shows `PnL арх. +x.xx%` + `real T·SL` hint; matrix aggregate bar shows `реальная сделка ★ T·SL · арх. PnL`
+- **Yellow real-trade frame in matrix** (`web/hourbounce.html`, `web/hourbounce.js`, `src/level_tester/api/app.py`): `_hb_real_trade_info`/`_hb_archive_trade` map archive trade to grid (`confirmation_bars_required` 0/1/2 → T1/T2/T3, `stop_loss_pct` or `|sl-entry|/entry` → nearest SL1/SL2/SL3, only for `closed_*`); matching cell gets `real-trade` outline + `★ real` tag + tooltip; combined best+real double outline; legend entry
+
+### Changed
+- **Script cache-buster**: `hourbounce.js?v=5` → `v=6`
+- **Version sync**: `VERSION` 1.2.0 → 1.2.1, `pyproject.toml` 1.2.0 → 1.2.1
+
 ## v1.2.0 (2026-09-11)
 
 ### Added

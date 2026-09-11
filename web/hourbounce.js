@@ -49,6 +49,41 @@ function tpSlLine(s) {
   const slTxt = sl !== null ? `${s.sl_arch}${fmtPct(pctSigned(sl, lvl, s.side))}` : '—';
   return `TP ${tpTxt} · SL ${slTxt}`;
 }
+// Потенциальный PnL ячейки: серверный pnl_pct, фолбэк — по входу/выходу.
+function cellPnlPct(cell, side) {
+  if (!cell) return null;
+  if (cell.pnl_pct !== null && cell.pnl_pct !== undefined && cell.pnl_pct !== '') {
+    const n = Number(cell.pnl_pct);
+    if (Number.isFinite(n)) return n;
+  }
+  const e = Number(cell.entry_price), x = Number(cell.exit_price);
+  if (!Number.isFinite(e) || !Number.isFinite(x) || e === 0) return null;
+  let r = ((x - e) / e) * 100;
+  if (String(side || '').toUpperCase() === 'SHORT') r = -r;
+  return r;
+}
+function fmtPnlSigned(p) {
+  const n = Number(p);
+  if (!Number.isFinite(n)) return '—';
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+function pnlClass(p) {
+  const n = Number(p);
+  if (!Number.isFinite(n) || n === 0) return '';
+  return n > 0 ? 'pnl-pos' : 'pnl-neg';
+}
+// Реальный (архивный) PnL сигнала: pnl_percent из БД, иначе — по entry/exit.
+function archPnlPct(s) {
+  if (s.pnl_pct_arch !== null && s.pnl_pct_arch !== undefined && s.pnl_pct_arch !== '') {
+    const n = Number(s.pnl_pct_arch);
+    if (Number.isFinite(n)) return n;
+  }
+  return pctSigned(
+    s.exit_arch !== undefined ? Number(s.exit_arch) : null,
+    Number(s.entry_arch),
+    s.side,
+  );
+}
 
 // Биржевая точность цены символа (приходит в signal.price_precision/tick_size).
 function precOf(signal) {
@@ -117,8 +152,13 @@ async function loadSignals() {
   items.forEach((s, i) => {
     const div = document.createElement('div');
     div.className = 'sigrow' + (state.sel && state.sel.signal_id === s.signal_id ? ' sel' : '');
+    const archPnl = archPnlPct(s);
+    const archPnlTxt = archPnl !== null
+      ? `<span class="${pnlClass(archPnl)}">PnL арх. ${fmtPnlSigned(archPnl)}</span>`
+      : '<span style="color:#5a636e">PnL арх. —</span>';
+    const realTag = s.real_trade ? ` · real ${s.real_trade.entry}·SL${s.real_trade.sl_index}` : '';
     div.innerHTML = `<div><div class="nm">${s.symbol} · ${s.side} · ${s.signal_id}</div>
-      <div class="mt">lvl ${s.level_price} · выставлен ${s.dt_place || ''} UTC<br>${tpSlLine(s)}<br>touch PGv2 ${s.touch_ref ? s.touch_ref.replace('T', ' ').replace('Z', ' UTC') : '—'}</div></div>
+      <div class="mt">lvl ${s.level_price} · выставлен ${s.dt_place || ''} UTC<br>${tpSlLine(s)}<br>${archPnlTxt}${realTag}<br>touch PGv2 ${s.touch_ref ? s.touch_ref.replace('T', ' ').replace('Z', ' UTC') : '—'}</div></div>
       <div>${badge(s.outcome_arch)}</div>`;
     div.onclick = () => selectSignal(i);
     box.appendChild(div);
@@ -269,7 +309,8 @@ function renderReview(d) {
 
   $('res-badge').className = 'badge ' + ({ TAKE: 'b-take', STOP: 'b-stop', NO_ENTRY: 'b-noentry', EXPIRED: 'b-expired' }[result.outcome] || 'b-noentry');
   $('res-badge').textContent = result.outcome + (result.ambiguous ? ' ~' : '') + (result.reason ? ` (${result.reason})` : '');
-  $('res-line').textContent = `${signal.symbol} · ${signal.side} · ${state.entry}/SL${params.sl_index} · вход ${fmtP(result.entry_price, signal)} · выход ${fmtP(result.exit_price, signal)} · touch наш ${shortDt(result.touch_dt)} · PGv2 ${shortDt(signal.touch_ref)}${d.cache && d.cache.cells_hit ? ' · из кеша' : ''}`;
+  const rPnl = cellPnlPct(result, signal.side);
+  $('res-line').textContent = `${signal.symbol} · ${signal.side} · ${state.entry}/SL${params.sl_index} · вход ${fmtP(result.entry_price, signal)} · выход ${fmtP(result.exit_price, signal)} · PnL ${fmtPnlSigned(rPnl)} · R ${result.r_multiple || '—'} · touch наш ${shortDt(result.touch_dt)} · PGv2 ${shortDt(signal.touch_ref)}${d.cache && d.cache.cells_hit ? ' · из кеша' : ''}`;
   const bn = $('banner');
   if (result.mode === 'placement') {
     bn.innerHTML = `С момента выставления уровня (<b>${signal.dt_place} UTC</b>) касания не было — ситуация не отработала во всей загруженной истории. ` +
@@ -290,7 +331,7 @@ function renderReview(d) {
     <div class="step ${s4}"><div class="dot">4</div>${s4label}</div>`;
   const ex = d.exec;
   $('exec-line').textContent = ex ? `PG: SL ${ex.sl} · TP ${ex.tp || '—'} · БУ ${ex.be || '—'} · trail ${ex.trail || '—'}${ex.trail_tp_only ? ' (только trail)' : ''}` : '';
-  $('metrics').innerHTML = `<span>R <b>${result.r_multiple || '—'}</b></span><span>max+ <b>${result.max_profit_pct || '—'}%</b></span><span>MAE <b>${result.mae_pct || '—'}%</b></span><span>MFE <b>${result.mfe_pct || '—'}%</b></span><span>баров <b>${result.bars_in_trade}</b></span><span>trail точек <b>${(result.trail_path || []).length}</b></span>`;
+  $('metrics').innerHTML = `<span>PnL <b class="${pnlClass(rPnl)}">${fmtPnlSigned(rPnl)}</b></span><span>R <b>${result.r_multiple || '—'}</b></span><span>max+ <b>${result.max_profit_pct || '—'}%</b></span><span>MAE <b>${result.mae_pct || '—'}%</b></span><span>MFE <b>${result.mfe_pct || '—'}%</b></span><span>баров <b>${result.bars_in_trade}</b></span><span>trail точек <b>${(result.trail_path || []).length}</b></span>`;
   $('evbody').innerHTML = (result.events || []).map((e) => `<tr><td>${e.seq}</td><td>${e.type}</td><td>${shortDt(e.dt)}</td><td>${e.price || '—'}</td></tr>`).join('');
 }
 
@@ -380,6 +421,8 @@ async function loadMatrix() {
   }
   destroyMatrix();
   const box = $('matrix');
+  const real = d.real_trade || null;
+  state.realTrade = real;
   const counts = { TAKE: 0, STOP: 0, NO_ENTRY: 0, EXPIRED: 0 };
   d.cells.forEach((c) => { counts[c.outcome] = (counts[c.outcome] || 0) + 1; });
   // Самый выгодный вариант: max PnL среди закрытых (TAKE/STOP).
@@ -401,10 +444,14 @@ async function loadMatrix() {
     bestKey = closed[0].c.entry + '|' + closed[0].c.sl_index;
     bestRed = d.cells.every((c) => c.outcome === 'STOP');
   }
+  const realTxt = real
+    ? `реальная сделка <b style="color:#f7c948">★ ${real.entry}·SL${real.sl_index}</b> · арх. PnL <b>${fmtPnlSigned(real.pnl_pct_arch)}</b>`
+    : 'реальная сделка <b>—</b> (в архиве нет закрытой сделки)';
   $('agg').innerHTML = `<span>winrate <b>${Math.round((counts.TAKE / 9) * 100)}%</b></span>
     <span>TAKE <b>${counts.TAKE}</b></span><span>STOP <b>${counts.STOP}</b></span>
     <span>NO_ENTRY <b>${counts.NO_ENTRY}</b></span><span>EXPIRED <b>${counts.EXPIRED}</b></span>
     <span>арх. исход <b>${s.outcome_arch}</b></span>
+    <span>${realTxt}</span>
     <span>${d.cache && d.cache.cells_hit ? 'из кеша' : 'посчитано'} · свечей из кеша <b>${(d.cache && d.cache.candles_cached) ?? '—'}</b></span>
     <span>окно: от выставления до ближайшей отработки · всё время UTC</span>`;
   $('res-badge').textContent = `${counts.TAKE}T / ${counts.STOP}S / ${counts.NO_ENTRY}NE`;
@@ -429,9 +476,12 @@ async function loadMatrix() {
       const cell = d.cells.find((c) => c.entry === code && c.sl_index === sl);
       const card = document.createElement('div');
       const hl = (code + '|' + sl) === bestKey ? (bestRed ? ' best-stop' : ' best-take') : '';
-      card.className = 'mcard' + hl;
+      const isReal = !!(real && real.entry === code && real.sl_index === sl);
+      card.className = 'mcard' + hl + (isReal ? ' real-trade' : '');
+      if (isReal) card.title = `Реальная сделка PGv2: ${real.entry}·SL${real.sl_index}, арх. PnL ${fmtPnlSigned(real.pnl_pct_arch)}`;
       const cls = { TAKE: 'b-take', STOP: 'b-stop', NO_ENTRY: 'b-noentry', EXPIRED: 'b-expired' }[cell.outcome];
-      card.innerHTML = `<div class="mhead"><span>T${code[1]}·SL${sl} · M5</span><span class="badge ${cls}">${cell.outcome}</span></div><div class="mchart"></div><div class="mfoot">in ${cell.entry_price || '—'} · out ${cell.exit_price || '—'} · R ${cell.r_multiple || '—'}</div>`;
+      const cp = cellPnlPct(cell, (d.signal && d.signal.side) || s.side);
+      card.innerHTML = `<div class="mhead"><span>T${code[1]}·SL${sl} · M5${isReal ? ' <span class="real-tag">★ real</span>' : ''}</span><span class="badge ${cls}">${cell.outcome}</span></div><div class="mchart"></div><div class="mfoot">in ${cell.entry_price || '—'} · out ${cell.exit_price || '—'} · R ${cell.r_multiple || '—'} · <span class="${pnlClass(cp)}">PnL ${fmtPnlSigned(cp)}</span></div>`;
       box.appendChild(card);
       const chartDiv = card.querySelector('.mchart');
       const chart = LightweightCharts.createChart(chartDiv, {

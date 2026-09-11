@@ -1141,6 +1141,126 @@ def _hb_arch_outcome(status: str | None, close_reason: str | None) -> str:
     return "EXPIRED"
 
 
+_HB_REQ_TO_ENTRY = {0: "T1", 1: "T2", 2: "T3"}
+_HB_SL_GRID = (0.5, 1.0, 1.5)
+
+
+def _hb_nearest_sl_index(sl_pct: float | None) -> int | None:
+    """Ближайший столбец сетки SL1/SL2/SL3 к реальному SL%."""
+    if sl_pct is None:
+        return None
+    try:
+        v = float(sl_pct)
+    except (TypeError, ValueError):
+        return None
+    if not v > 0:
+        return None
+    return min((1, 2, 3), key=lambda i: abs(_HB_SL_GRID[i - 1] - v))
+
+
+def _hb_real_trade_info(
+    *,
+    status: str | None = None,
+    entry_price: float | str | None = None,
+    exit_price: float | str | None = None,
+    stop_loss: float | str | None = None,
+    pnl: float | str | None = None,
+    pnl_percent: float | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Карта реальной архивной сделки на сетку T1/T2/T3 × SL1/SL2/SL3.
+
+    entry: confirmation_bars_required 0->T1, 1->T2, 2->T3 (иначе None).
+    sl_index: ближайший к stop_loss_pct из metadata, иначе |sl-entry|/entry.
+    Возвращает None, если сделка не отторгована (нет closed_* статуса)
+    или привязку построить не из чего.
+    """
+    traded = isinstance(status, str) and status.startswith("closed_")
+    if not traded:
+        return None
+    meta = metadata if isinstance(metadata, dict) else {}
+    try:
+        req = int(meta.get("confirmation_bars_required")) if meta.get("confirmation_bars_required") is not None else None
+    except (TypeError, ValueError):
+        req = None
+    entry = _HB_REQ_TO_ENTRY.get(req) if req is not None else None
+    sl_pct: float | None = None
+    try:
+        if meta.get("stop_loss_pct") is not None:
+            sl_pct = float(meta.get("stop_loss_pct"))
+    except (TypeError, ValueError):
+        sl_pct = None
+    if sl_pct is None:
+        try:
+            e = float(entry_price) if entry_price not in (None, "") else None
+            s = float(stop_loss) if stop_loss not in (None, "") else None
+            if e and s:
+                sl_pct = abs(s - e) / abs(e) * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            sl_pct = None
+    sl_index = _hb_nearest_sl_index(sl_pct)
+    if entry is None or sl_index is None:
+        return None
+    try:
+        pp = float(pnl_percent) if pnl_percent not in (None, "") else None
+    except (TypeError, ValueError):
+        pp = None
+    try:
+        p = float(pnl) if pnl not in (None, "") else None
+    except (TypeError, ValueError):
+        p = None
+    return {
+        "entry": entry, "sl_index": sl_index,
+        "sl_pct": round(float(sl_pct), 4) if sl_pct is not None else None,
+        "entry_arch": entry_price, "exit_arch": exit_price,
+        "pnl_arch": p, "pnl_pct_arch": round(pp, 4) if pp is not None else None,
+        "traded": True,
+    }
+
+
+def _hb_archive_trade(signal_id: str) -> dict[str, Any] | None:
+    """Одна архивная сделка + привязка к ячейке матрицы. None — нет факта сделки."""
+    try:
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        adb = Path(str(PGV2_ARCHIVE_DB))
+        if not adb.exists():
+            return None
+        conn = _sqlite3.connect(f"file:{adb.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.row_factory = _sqlite3.Row
+            row = conn.execute(
+                "SELECT status, entry_price, exit_price, stop_loss, pnl, pnl_percent, metadata"
+                " FROM signal_archive WHERE original_id = ? OR id = ? LIMIT 1",
+                (signal_id, signal_id),
+            ).fetchone()
+            if not row:
+                return None
+            keys = set(row.keys())
+            meta: dict[str, Any] = {}
+            try:
+                raw = row["metadata"] if "metadata" in keys else None
+                meta = _json.loads(raw) if isinstance(raw, str) and raw else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+            except Exception:
+                meta = {}
+            return _hb_real_trade_info(
+                status=row["status"] if "status" in keys else None,
+                entry_price=row["entry_price"] if "entry_price" in keys else None,
+                exit_price=row["exit_price"] if "exit_price" in keys else None,
+                stop_loss=row["stop_loss"] if "stop_loss" in keys else None,
+                pnl=row["pnl"] if "pnl" in keys else None,
+                pnl_percent=row["pnl_percent"] if "pnl_percent" in keys else None,
+                metadata=meta,
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 def _hb_price_spec(symbol: str, fallback_price: float | str) -> dict[str, Any]:
     """Биржевая точность цены: tick_size/price_precision из каталога, иначе по знакам цены."""
     try:
@@ -1226,7 +1346,8 @@ async def hourbounce_signals(
             conn.row_factory = _sqlite3.Row
             try:
                 rows = conn.execute(
-                    "SELECT original_id, id, status, close_reason, created_at, metadata FROM signal_archive"
+                    "SELECT original_id, id, status, close_reason, created_at, metadata,"
+                    " entry_price, exit_price, stop_loss, pnl, pnl_percent FROM signal_archive"
                 ).fetchall()
                 for r in rows:
                     keys = set(r.keys())
@@ -1234,15 +1355,27 @@ async def hourbounce_signals(
                     placement = None
                     touch_ref = None
                     watch_start = None
+                    m: dict[str, Any] = {}
                     try:
                         import json as _json
 
                         m = _json.loads(meta_raw) if isinstance(meta_raw, str) and meta_raw else {}
+                        if not isinstance(m, dict):
+                            m = {}
                         placement = m.get("placement_date") or m.get("timestamp") or m.get("load_date")
                         touch_ref = m.get("confirmation_started_at")
                         watch_start = m.get("confirmation_waiting_started_at")
                     except Exception:
                         placement = None
+                    real = _hb_real_trade_info(
+                        status=r["status"] if "status" in keys else None,
+                        entry_price=r["entry_price"] if "entry_price" in keys else None,
+                        exit_price=r["exit_price"] if "exit_price" in keys else None,
+                        stop_loss=r["stop_loss"] if "stop_loss" in keys else None,
+                        pnl=r["pnl"] if "pnl" in keys else None,
+                        pnl_percent=r["pnl_percent"] if "pnl_percent" in keys else None,
+                        metadata=m,
+                    )
                     for k in (r["original_id"], r["id"]):
                         if k:
                             arch_extra[str(k)] = {
@@ -1251,6 +1384,11 @@ async def hourbounce_signals(
                                 "placement_date": placement,
                                 "touch_ref": touch_ref,
                                 "watch_start": watch_start,
+                                "entry_arch": r["entry_price"] if "entry_price" in keys else None,
+                                "exit_arch": r["exit_price"] if "exit_price" in keys else None,
+                                "pnl_arch": r["pnl"] if "pnl" in keys else None,
+                                "pnl_pct_arch": r["pnl_percent"] if "pnl_percent" in keys else None,
+                                "real_trade": real,
                             }
                     # ключ original_id может быть без суффикса, а SignalReader отдаёт original_id как есть
             finally:
@@ -1299,6 +1437,11 @@ async def hourbounce_signals(
             "outcome_arch": outcome_arch,
             "status": extra.get("status"),
             "close_reason": extra.get("close_reason"),
+            "entry_arch": extra.get("entry_arch"),
+            "exit_arch": extra.get("exit_arch"),
+            "pnl_arch": extra.get("pnl_arch"),
+            "pnl_pct_arch": extra.get("pnl_pct_arch"),
+            "real_trade": extra.get("real_trade"),
             "pg_available": s.stop_loss is not None,
             "source": s.source,
         })
@@ -1412,7 +1555,7 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
         )
         cells = []
         for res in results:
-            j = _hb_result_json(res)
+            j = _hb_result_json(res, side)
             j["sl_pct"] = str(DEFAULT_CONFIG.sl_sizes[res.sl_index - 1])
             cells.append(j)
         try:
@@ -1435,6 +1578,12 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
     out_cells = []
     for cell in cells:
         c2 = dict(cell)
+        # backfill потенциального PnL для ячеек из старого кеша (без pnl_pct)
+        if c2.get("pnl_pct") is None:
+            try:
+                c2["pnl_pct"] = str(_hb_cell_pnl(c2, side)) if c2.get("entry_price") and c2.get("exit_price") else None
+            except Exception:
+                pass
         anchor = None
         if cell.get("touch_dt"):
             tdt = _hb_parse_time(cell["touch_dt"])
@@ -1469,6 +1618,7 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
         "sig_idx": sig_idx,
         "cells": out_cells,
         "candles": [_c(c) for c in candles],
+        "real_trade": _hb_archive_trade(signal_id),
         "cache": {
             "candles_cached": int(cache_stats.get("from_cache") or 0),
             "candles_loaded": int(cache_stats.get("from_binance") or 0),
@@ -1536,10 +1686,11 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
             "volume": float(c.volume),
         }
 
-    result = _hb_result_json(res)
+    result = _hb_result_json(res, side)
     result["mode"] = mode
     return {
         "pg_available": True, "pg_reason": None,
+        "real_trade": _hb_archive_trade(signal_id),
         "exec": {
             "required_bars": int(meta.get("required_bars", 2)),
             "sl": str(ex.sl_price),
@@ -1610,6 +1761,7 @@ async def hourbounce_review(
         "pg_available": pg_available,
         "result": result,
         "candles": candles[lo:hi],
+        "real_trade": data.get("real_trade"),
         "cache": data["cache"],
     }
 
@@ -1625,7 +1777,17 @@ def _hb_price_str(v: object) -> str | None:
         return str(v)
 
 
-def _hb_result_json(res) -> dict[str, Any]:
+def _hb_result_json(res, side: str | None = None) -> dict[str, Any]:
+    pnl_pct: str | None = None
+    try:
+        if side in ("LONG", "SHORT") and res.entry_price and res.exit_price:
+            e = float(res.entry_price)
+            x = float(res.exit_price)
+            if e != 0:
+                r = (x - e) / e * 100 if side == "LONG" else (e - x) / e * 100
+                pnl_pct = str(round(r, 4))
+    except (TypeError, ValueError, ZeroDivisionError):
+        pnl_pct = None
     return {
         "entry": res.entry_code, "sl_index": res.sl_index,
         "outcome": res.outcome, "reason": res.reason, "ambiguous": res.ambiguous,
@@ -1637,6 +1799,7 @@ def _hb_result_json(res) -> dict[str, Any]:
         "exit_dt": res.exit_dt.isoformat() if res.exit_dt else None,
         "exit_price": _hb_price_str(res.exit_price),
         "exit_kind": res.exit_kind,
+        "pnl_pct": pnl_pct,
         "be_price": _hb_price_str(res.be_price),
         "r_multiple": str(round(res.r_multiple, 4)) if res.r_multiple is not None else None,
         "max_profit_pct": str(round(res.max_profit_pct, 4)) if res.max_profit_pct is not None else None,
@@ -1682,12 +1845,14 @@ async def hourbounce_export(
     sig = data["signal"]
     cards = ""
     for cell in data["cells"]:
+        _pnl = _hb_cell_pnl(cell, sig["side"])
+        _pnl_txt = f'{"+" if _pnl > 0 else ""}{_pnl:.2f}%'
         cards += (
             f'<div class="card"><div class="ch"><span>T{cell["entry"][1]} · SL{cell["sl_index"]} '
             f'({cell["sl_pct"]}%)</span><span class="badge">{cell["outcome"]}</span></div>'
             f'<div class="chart" id="ch-{cell["entry"]}-{cell["sl_index"]}"></div>'
             f'<div class="mt">entry {cell["entry_price"] or "—"} · exit {cell["exit_price"] or "—"}'
-            f' · R {cell["r_multiple"] or "—"}</div></div>'
+            f' · R {cell["r_multiple"] or "—"} · PnL {_pnl_txt}</div></div>'
         )
     rows = ""
     for cell in data["cells"]:

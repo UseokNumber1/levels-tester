@@ -34,6 +34,11 @@ main{padding:12px 14px;overflow-y:auto;min-width:0}
 .mcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
 .mcard.best-take{outline:2px solid #26a69a;box-shadow:0 0 0 1px #26a69a}
 .mcard.best-stop{outline:2px solid #ef5350;box-shadow:0 0 0 1px #ef5350}
+.mcard.real-trade{outline:2px solid #f7c948;box-shadow:0 0 0 1px #f7c948}
+.mcard.best-take.real-trade{outline:2px solid #f7c948;box-shadow:0 0 0 1px #26a69a,0 0 0 3px #f7c948}
+.mcard.best-stop.real-trade{outline:2px solid #f7c948;box-shadow:0 0 0 1px #ef5350,0 0 0 3px #f7c948}
+.real-tag{display:inline-block;background:#f7c948;color:#0b0e12;font-weight:700;border-radius:8px;padding:0 6px;margin-left:4px;font-size:10px}
+.pnl-pos{color:#26a69a;font-weight:700}.pnl-neg{color:#ef5350;font-weight:700}
 .mhead{display:flex;justify-content:space-between;padding:6px 9px;background:var(--panel2);font-size:11px;font-family:ui-monospace,monospace;color:var(--dim)}
 .mchart{height:200px;position:relative}
 .mfoot{padding:5px 9px;font-size:10.5px;color:var(--dim);font-family:ui-monospace,monospace;border-top:1px solid var(--border)}
@@ -110,9 +115,9 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <div class="stepper" id="stepper"></div>
 <div class="metrics" id="metrics"></div>
 <table class="ev"><thead><tr><th>seq</th><th>type</th><th>dt (UTC)</th><th>price</th></tr></thead><tbody id="evbody"></tbody></table>
-<div class="legend"><span><i class="sw" style="background:#ff9f43"></i>H1 уровень</span><span><i class="sw" style="background:#ef5350"></i>SL</span><span><i class="sw" style="background:#26a69a"></i>trail</span><span><i class="sw" style="background:#2962ff"></i>confirm</span><span>① касание · ② C1/C2 подтверждение (только подряд) · ③ вход · ④ трейлинг · время UTC</span></div>
+<div class="legend"><span><i class="sw" style="background:#ff9f43"></i>H1 уровень</span><span><i class="sw" style="background:#ef5350"></i>SL</span><span><i class="sw" style="background:#26a69a"></i>trail</span><span><i class="sw" style="background:#2962ff"></i>confirm</span><span><i class="sw" style="background:#f7c948"></i>★ real — ячейка реальной сделки PGv2</span><span>① касание · ② C1/C2 подтверждение (только подряд) · ③ вход · ④ трейлинг · время UTC</span></div>
 </main>
 </div>
-<script src="/static/hourbounce.js?v=5"></script>
+<script src="/static/hourbounce.js?v=6"></script>
 </body>
 </html>
