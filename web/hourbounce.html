@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HourBounce Review Lite</title>
+<link rel="stylesheet" href="/static/styles.css">
+<script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232c;--border:#2a323d;--text:#d7dee8;--dim:#8b96a5;--accent:#ff9f43;--take:#26a69a;--stop:#ef5350;--noentry:#6b7280;--expired:#f7c948}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border)}
+header h1{font-size:15px;margin:0}header .sub{color:var(--dim);font-size:12px}
+.layout{display:grid;grid-template-columns:auto 1fr;height:calc(100vh - 52px)}
+aside{width:540px;min-width:440px;max-width:760px;resize:horizontal;overflow:hidden;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.filters{padding:10px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap}
+.filters input,.filters select{background:#0b0e12;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px}
+.siglist{overflow-y:auto;flex:1}
+.sigrow{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer}
+.sigrow:hover{background:var(--panel)}.sigrow.sel{background:var(--panel2);border-left:3px solid var(--accent)}
+.sigrow .nm{font-weight:600;font-family:ui-monospace,monospace;overflow-wrap:anywhere}.sigrow .mt{color:var(--dim);font-size:11px;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+.badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;letter-spacing:.05em}
+.b-take{background:var(--take);color:#0b0e12}.b-stop{background:var(--stop);color:#fff}.b-noentry{background:var(--noentry);color:#fff}.b-expired{background:var(--expired);color:#0b0e12}
+main{padding:12px 14px;overflow-y:auto;min-width:0}
+.tabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.tabs .grp{display:flex;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:3px;gap:3px}
+.tabs button{background:transparent;color:var(--dim);border:0;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600}
+.tabs button.on{background:var(--accent);color:#0b0e12}
+#chart{height:420px;background:var(--panel);border:1px solid var(--border);border-radius:8px;position:relative}
+#matrix{display:none}
+#matrix.on{display:grid;grid-template-columns:52px repeat(3,minmax(300px,1fr));gap:10px}
+.colh{text-align:center;color:var(--dim);font-size:11px;font-weight:700;letter-spacing:.06em;padding:4px 0}
+.rowh{writing-mode:vertical-rl;transform:rotate(180deg);display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px;font-weight:700;border-right:1px dashed var(--border);position:sticky;left:0;background:var(--bg);z-index:2}
+.mcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.mhead{display:flex;justify-content:space-between;padding:6px 9px;background:var(--panel2);font-size:11px;font-family:ui-monospace,monospace;color:var(--dim)}
+.mchart{height:200px;position:relative}
+.mfoot{padding:5px 9px;font-size:10.5px;color:var(--dim);font-family:ui-monospace,monospace;border-top:1px solid var(--border)}
+#agg{display:none;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:11.5px;color:var(--dim)}
+#agg.on{display:flex}
+#agg b{color:var(--text)}
+#banner{display:none;background:#2a230f;border:1px solid #8a6d1c;border-radius:8px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#f7c948}
+#banner.on{display:block}
+.modebtn{background:var(--panel);color:var(--dim);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px}
+.modebtn.on{background:var(--accent);color:#0b0e12;border-color:var(--accent);font-weight:700}
+.stepper{display:flex;gap:4px;align-items:center;margin:10px 0;font-size:11.5px;color:var(--dim)}
+.step{flex:1;display:flex;gap:6px;align-items:center;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+.dot{width:18px;height:18px;border-radius:50%;background:#0b0e12;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}
+.step.on{color:var(--text)}.step.on .dot{background:var(--accent);color:#0b0e12;border-color:var(--accent)}
+.step.ok-take .dot{background:var(--take);color:#0b0e12}.step.ok-stop .dot{background:var(--stop);color:#fff}.step.na{opacity:.5}
+.metrics{display:flex;gap:14px;flex-wrap:wrap;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);margin-bottom:8px}
+.metrics b{color:var(--text)}
+table.ev{width:100%;border-collapse:collapse;font-size:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6px 8px}table.ev td{padding:5px 8px;border-top:1px solid var(--border);font-family:ui-monospace,monospace}
+.legend{display:flex;gap:14px;color:var(--dim);font-size:11px;margin-top:8px}.sw{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+</style>
+</head>
+<body>
+<header>
+<h1>HourBounce Review Lite <span id="app-version" style="color:#f7c948;font-size:13px;font-weight:600"></span></h1>
+<span class="sub" id="head-sub">архив PGv2 · M5 · T1/T2/T3 × SL 0.5/1.0/1.5</span>
+<span style="margin-left:auto"></span>
+<a href="/report" style="color:#8ec0ff;font-size:12px;margin-right:10px">→ PnL-отчёт</a><a href="/backtest" style="color:#8ec0ff;font-size:12px">→ Backtester</a></header>
+<div class="layout">
+<aside>
+<div class="filters">
+<input id="f-search" placeholder="Поиск BTC, id..." style="flex:1;min-width:140px">
+<select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option></select>
+<select id="f-outcome"><option value="">Все исходы арх.</option><option>TAKE</option><option>STOP</option><option>NO_ENTRY</option><option>EXPIRED</option></select>
+<input id="f-from" type="date" title="с даты выставления (UTC)" style="width:130px">
+<input id="f-to" type="date" title="по дату выставления (UTC)" style="width:130px">
+<select id="f-sort" title="Сортировка списка">
+<option value="date_desc">Дата ↓</option>
+<option value="date_asc">Дата ↑</option>
+<option value="name_asc">Имя А→Я</option>
+<option value="name_desc">Имя Я→А</option>
+<option value="symbol_asc">Монета А→Я</option>
+</select>
+<button id="f-load" style="background:#1a3a5c;color:#cfe6ff;border:1px solid #2a5a8c;border-radius:6px;padding:6px 12px;cursor:pointer">Загрузить</button>
+</div>
+<div id="sig-count" style="padding:6px 10px;color:var(--dim);font-size:11px"></div>
+<div class="siglist" id="siglist"></div>
+</aside>
+<main>
+<div class="tabs">
+<div class="grp" id="tabs-entry">
+<button data-e="T1" class="on">T1 · касание</button><button data-e="T2">T2 · 1 бар</button><button data-e="T3">T3 · 2 бара</button>
+</div>
+<div class="grp" id="tabs-sl">
+<button data-s="1">SL1 0.5%</button><button data-s="2">SL2 1.0%</button><button data-s="3" class="on">SL3 1.5%</button>
+</div>
+<div class="grp" id="tabs-exec">
+<button data-x="grid" class="on">Сетка SL</button><button data-x="signal">Сделка PG 1:1</button>
+</div>
+<span id="exec-line" style="color:var(--dim);font-size:11px;font-family:ui-monospace,monospace"></span>
+<span class="badge b-noentry" id="res-badge">—</span>
+<span id="res-line" style="color:var(--dim);font-size:12px"></span>
+<span style="margin-left:auto"></span>
+<button class="modebtn on" id="m-single">График</button>
+<button class="modebtn" id="m-matrix">Матрица 3×3</button>
+<label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);cursor:pointer"><input type="checkbox" id="m-sync" checked> sync</label>
+<button class="modebtn" id="m-export">Export HTML</button>
+<button class="modebtn" id="m-refresh" title="Пересчитать с Binance, игнорируя кеш">↻</button>
+</div>
+<div id="banner"></div>
+<div id="agg"></div>
+<div id="matrix"></div>
+<div id="chart"></div>
+<div class="stepper" id="stepper"></div>
+<div class="metrics" id="metrics"></div>
+<table class="ev"><thead><tr><th>seq</th><th>type</th><th>dt (UTC)</th><th>price</th></tr></thead><tbody id="evbody"></tbody></table>
+<div class="legend"><span><i class="sw" style="background:#ff9f43"></i>H1 уровень</span><span><i class="sw" style="background:#ef5350"></i>SL</span><span><i class="sw" style="background:#26a69a"></i>trail</span><span><i class="sw" style="background:#2962ff"></i>confirm</span><span>① касание · ② C1/C2 подтверждение (только подряд) · ③ вход · ④ трейлинг · время UTC</span></div>
+</main>
+</div>
+<script src="/static/hourbounce.js"></script>
+</body>
+</html>

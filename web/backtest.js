@@ -188,7 +188,27 @@
   });
 
   // --- Variants: helpers ---
+  const DB_ID = '__DB__';
+  function isDbRow(r) { return r && (r.id === DB_ID || r._db); }
+  function dbRow(selected) {
+    return {
+      id: DB_ID,
+      name: 'DB · как в базе',
+      sl_pct: '', tp_type: 'none', tp_value: '',
+      trailing_activation_pct: '', trailing_stop_pct: '',
+      trailing_update_threshold_pct: '', trailing_tp_only: false,
+      breakeven_trigger_pct: '', breakeven_lock_pct: '',
+      partial_close_pct: '', partial_close_rr: '',
+      _selected: selected !== false, _db: true,
+    };
+  }
+  function ensureDbRow() {
+    const i = variantRows.findIndex(isDbRow);
+    if (i === -1) variantRows.unshift(dbRow(true));
+    else { variantRows[i]._db = true; variantRows.splice(0, 0, variantRows.splice(i, 1)[0]); }
+  }
   function toRow(v, selected) {
+    if (v && (v.id === DB_ID || v.db_baseline)) return dbRow(selected);
     let tp_type = 'none';
     let tp_value = '';
     if (v.tp_rr != null && v.tp_rr !== '') { tp_type = 'rr'; tp_value = String(v.tp_rr); }
@@ -232,7 +252,7 @@
   }
 
   function persistRows() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(variantRows)); } catch (_) {}
+    try { localStorage.setItem(LS_KEY, JSON.stringify(variantRows.filter(r => !isDbRow(r)))); } catch (_) {}
   }
 
   function loadPersisted() {
@@ -246,6 +266,7 @@
   }
 
   function validateRow(r) {
+    if (isDbRow(r)) return {};
     const errs = {};
     if (!r.id || !/^[a-zA-Z0-9_-]+$/.test(r.id)) errs.id = true;
     if (!r.name || !r.name.trim()) errs.name = true;
@@ -277,6 +298,19 @@
       variantsBody.appendChild(tr);
     } else {
       variantRows.forEach((r, idx) => {
+        if (isDbRow(r)) {
+          const tr = document.createElement('tr');
+          tr.dataset.idx = String(idx);
+          tr.style.background = '#0f2a1a';
+          tr.innerHTML = `
+          <td class="col-check"><input type="checkbox" data-field="_selected" ${r._selected ? 'checked' : ''}></td>
+          <td class="col-id"><span class="tag" style="background:#1b5e20;color:#81c784;">🔒 DB</span></td>
+          <td class="col-name" colspan="12" style="color:#81c784;">DB · как в базе — frozen entry + снапшот SL/TP/BE/Trail/Fix из сигнала <span style="color:#555;font-size:11px;">(параметры подтянутся автоматически, см. /api/backtest/db_preview)</span></td>
+          <td style="text-align:center;color:#555;" title="Базовая строка, удалить нельзя">🔒</td>
+        `;
+          variantsBody.appendChild(tr);
+          return;
+        }
         const errs = validateRow(r);
         const tr = document.createElement('tr');
         tr.dataset.idx = String(idx);
@@ -367,6 +401,7 @@
     const tr = btn.closest('tr');
     const idx = parseInt(tr.dataset.idx);
     if (Number.isNaN(idx)) return;
+    if (isDbRow(variantRows[idx])) return; // DB baseline cannot be deleted
     variantRows.splice(idx, 1);
     persistRows();
     renderVariantRows();
@@ -485,11 +520,14 @@
             if (r.tp_type === undefined) { const tmp = toRow(r, r._selected); Object.assign(r, tmp); }
             if (r._selected === undefined) r._selected = true;
           });
+          ensureDbRow();
+          persistRows();
           renderVariantRows();
           return;
         }
       }
-      variantRows = builtin.map((v, i) => toRow(v, i < 3));
+      variantRows = builtin.map((v, i) => toRow(v, v.id === DB_ID ? true : i < 4));
+      ensureDbRow();
       persistRows();
       renderVariantRows();
     } catch (e) { /* ignore */ }
@@ -505,6 +543,12 @@
     const payloads = [];
     const seenIds = new Set();
     selected.forEach((r, idx) => {
+      if (isDbRow(r)) {
+        if (seenIds.has(DB_ID)) return;
+        seenIds.add(DB_ID);
+        payloads.push({ id: DB_ID, _db: true });
+        return;
+      }
       const errs = validateRow(r);
       if (Object.keys(errs).length) {
         errors.push(`Строка ${idx+1} (${r.id}): исправьте подсвеченные поля`);
@@ -570,7 +614,7 @@
       const body = {
         signal_ids: signalIds,
         variants: payloads.map(p => p.id),
-        custom_variants: payloads,
+        custom_variants: payloads.filter(p => p.id !== DB_ID),
         entry_type: entryType,
         limit_offset: 0.2,
         confirmation_methods: Array.from(document.querySelectorAll('.bt-conf-method:checked')).map(cb => parseInt(cb.value)),
@@ -873,10 +917,29 @@
       });
     }
     const bestPnl = Math.max(...sorted.map(m => m.total_pnl_pct));
+    // DB baseline PnL per entry method (variant_name = "Method | Name")
+    const dbPnlByMethod = {};
+    sorted.forEach(m => {
+      if (m.variant_id === '__DB__') {
+        const method = String(m.variant_name || '').split(' | ')[0];
+        dbPnlByMethod[method] = m.total_pnl_pct;
+      }
+    });
     sorted.forEach(m => {
       const tr = document.createElement('tr');
-      if (m.total_pnl_pct === bestPnl) tr.className = 'best';
-      tr.innerHTML = `<td>${m.variant_name}</td>
+      const isDb = m.variant_id === '__DB__';
+      if (isDb) { tr.style.background = '#0f2a1a'; tr.style.outline = '1px solid #1b5e20'; }
+      else if (m.total_pnl_pct === bestPnl) tr.className = 'best';
+      const method = String(m.variant_name || '').split(' | ')[0];
+      const dbPnl = dbPnlByMethod[method];
+      let deltaCell = '<span style="color:#555;">—</span>';
+      if (!isDb && dbPnl !== undefined) {
+        const d = m.total_pnl_pct - dbPnl;
+        deltaCell = `<span class="${d >= 0 ? 'pos' : 'neg'}">${d >= 0 ? '+' : ''}${d.toFixed(2)}%</span>`;
+      } else if (isDb) {
+        deltaCell = '<span class="tag" style="background:#1b5e20;color:#81c784;">DB</span>';
+      }
+      tr.innerHTML = `<td>${isDb ? '🔒 ' : ''}${m.variant_name}</td>
         <td>${m.total_trades}</td>
         <td style="color:#888;">${m.no_entry || 0}</td>
         <td class="${m.winrate >= 50 ? 'pos' : 'neg'}">${m.winrate.toFixed(2)}%</td>
@@ -885,7 +948,8 @@
         <td class="neg">-${m.max_drawdown_pct ? m.max_drawdown_pct.toFixed(2) : m.max_drawdown.toFixed(2)}</td>
         <td class="pos">+${m.avg_win_pct.toFixed(2)}%</td>
         <td class="neg">${m.avg_loss_pct.toFixed(2)}%</td>
-        <td class="${m.expectancy_pct >= 0 ? 'pos' : 'neg'}">${m.expectancy_pct >= 0 ? '+' : ''}${m.expectancy_pct.toFixed(2)}%</td>`;
+        <td class="${m.expectancy_pct >= 0 ? 'pos' : 'neg'}">${m.expectancy_pct >= 0 ? '+' : ''}${m.expectancy_pct.toFixed(2)}%</td>
+        <td>${deltaCell}</td>`;
       tbody.appendChild(tr);
     });
   }

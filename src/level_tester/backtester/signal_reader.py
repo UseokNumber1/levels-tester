@@ -4,7 +4,32 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+
+def _to_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool(v: Any) -> Optional[bool]:
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +43,26 @@ class SignalEntry:
     timeframe: str
     timestamp: Optional[str]  # ISO or None
     source: str  # 'trading' | 'archive'
+    # --- P_G_V2 execution snapshot (None = not stored, use live fallback) ---
+    stop_loss_pct: Optional[float] = None
+    take_profits: Optional[str] = None  # JSON array as stored in DB
+    take_profit_pct: Optional[float] = None
+    stop_loss_source: Optional[str] = None
+    take_profit_source: Optional[str] = None
+    breakeven_enabled: Optional[bool] = None
+    breakeven_trigger_pct: Optional[float] = None
+    breakeven_profit_pct: Optional[float] = None
+    breakeven_fix_enabled: Optional[bool] = None
+    breakeven_fix_pct: Optional[float] = None
+    trailing_stop_enabled: Optional[bool] = None
+    trailing_activation_pct: Optional[float] = None
+    trailing_stop_pct: Optional[float] = None
+    trailing_update_threshold_pct: Optional[float] = None
+    trailing_tp_only: Optional[bool] = None
+    # --- состояние сделки в архиве (для отличия pristine-SL от подвинутого) ---
+    confirmation_timeframe: Optional[str] = None  # 1m | 5m — TF подтверждения PGv2
+    trailing_activated: Optional[bool] = None  # трейлинг успел включиться
+    sl_moved_to_breakeven: Optional[bool] = None  # стоп уже двигали в БУ
 
 
 class SignalReader:
@@ -105,6 +150,21 @@ class SignalReader:
         # Trading entries would need status check, but we push it to SQL when possible.
         return True
 
+    SNAPSHOT_COLS = (
+        "stop_loss_pct", "take_profits", "take_profit_pct",
+        "stop_loss_source", "take_profit_source",
+        "breakeven_enabled", "breakeven_trigger_pct", "breakeven_profit_pct",
+        "breakeven_fix_enabled", "breakeven_fix_pct",
+        "trailing_stop_enabled", "trailing_activation_pct", "trailing_stop_pct",
+        "trailing_update_threshold_pct", "trailing_tp_only",
+    )
+
+    def _existing_cols(self, conn: sqlite3.Connection, table: str) -> set[str]:
+        try:
+            return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except Exception:
+            return set()
+
     def _read_trading(
         self,
         symbol: str | None = None,
@@ -120,10 +180,13 @@ class SignalReader:
         conn = sqlite3.connect(f"file:{self._trading_db.as_posix()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            query = (
-                "SELECT id, symbol, side, entry_price, stop_loss, rr_ratio, "
-                "timeframe, timestamp, created_at FROM signals WHERE 1=1"
-            )
+            existing = self._existing_cols(conn, "signals")
+            snap = [c for c in self.SNAPSHOT_COLS if c in existing]
+            cols = ("id, symbol, side, entry_price, stop_loss, rr_ratio, "
+                    "timeframe, timestamp, created_at")
+            if snap:
+                cols += ", " + ", ".join(snap)
+            query = f"SELECT {cols} FROM signals WHERE 1=1"
             params: list = []
 
             if signal_id:
@@ -174,7 +237,7 @@ class SignalReader:
         try:
             query = (
                 "SELECT original_id, symbol, side, entry_price, stop_loss, "
-                "rr_ratio, created_at FROM signal_archive WHERE 1=1"
+                "rr_ratio, created_at, metadata, take_profits FROM signal_archive WHERE 1=1"
             )
             params: list = []
 
@@ -201,6 +264,8 @@ class SignalReader:
             results = []
             for row in rows:
                 sid = row["original_id"] or row["symbol"]
+                snap = self._parse_archive_metadata(row["metadata"] if "metadata" in row.keys() else None)
+                tp_raw = row["take_profits"] if "take_profits" in row.keys() else None
                 results.append(SignalEntry(
                     signal_id=sid,
                     symbol=row["symbol"],
@@ -211,13 +276,45 @@ class SignalReader:
                     timeframe="1h",
                     timestamp=row["created_at"],
                     source="archive",
+                    take_profits=str(tp_raw) if tp_raw else snap.get("take_profits"),
+                    stop_loss_pct=_to_float(snap.get("stop_loss_pct")),
+                    take_profit_pct=_to_float(snap.get("take_profit_pct")),
+                    stop_loss_source=snap.get("stop_loss_source"),
+                    take_profit_source=snap.get("take_profit_source"),
+                    breakeven_enabled=_to_bool(snap.get("breakeven_enabled")),
+                    breakeven_trigger_pct=_to_float(snap.get("breakeven_trigger_pct")),
+                    breakeven_profit_pct=_to_float(snap.get("breakeven_profit_pct")),
+                    breakeven_fix_enabled=_to_bool(snap.get("breakeven_fix_enabled")),
+                    breakeven_fix_pct=_to_float(snap.get("breakeven_fix_pct")),
+                    trailing_stop_enabled=_to_bool(snap.get("trailing_stop_enabled")),
+                    trailing_activation_pct=_to_float(snap.get("trailing_activation_pct")),
+                    trailing_stop_pct=_to_float(snap.get("trailing_stop_pct")),
+                    trailing_update_threshold_pct=_to_float(snap.get("trailing_update_threshold_pct")),
+                    trailing_tp_only=_to_bool(snap.get("trailing_tp_only")),
+                    confirmation_timeframe=snap.get("confirmation_timeframe"),
+                    trailing_activated=_to_bool(snap.get("trailing_activated")),
+                    sl_moved_to_breakeven=_to_bool(snap.get("sl_moved_to_breakeven")),
                 ))
             return results
         finally:
             conn.close()
 
     @staticmethod
+    def _parse_archive_metadata(raw: object) -> dict:
+        if not raw:
+            return {}
+        try:
+            import json as _json
+            data = _json.loads(raw) if isinstance(raw, str) else {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
     def _row_to_signal(row: sqlite3.Row, source: str) -> SignalEntry:
+        keys = set(row.keys())
+        def _g(col: str):
+            return row[col] if col in keys else None
         return SignalEntry(
             signal_id=row["id"],
             symbol=row["symbol"],
@@ -228,6 +325,24 @@ class SignalReader:
             timeframe=row["timeframe"] or "1h",
             timestamp=row["timestamp"] or row["created_at"],
             source=source,
+            stop_loss_pct=_to_float(_g("stop_loss_pct")),
+            take_profits=str(_g("take_profits")) if _g("take_profits") else None,
+            take_profit_pct=_to_float(_g("take_profit_pct")),
+            stop_loss_source=_g("stop_loss_source"),
+            take_profit_source=_g("take_profit_source"),
+            breakeven_enabled=_to_bool(_g("breakeven_enabled")),
+            breakeven_trigger_pct=_to_float(_g("breakeven_trigger_pct") if _g("breakeven_trigger_pct") is not None else _g("breakeven_trigger")),
+            breakeven_profit_pct=_to_float(_g("breakeven_profit_pct") if _g("breakeven_profit_pct") is not None else _g("breakeven_profit")),
+            breakeven_fix_enabled=_to_bool(_g("breakeven_fix_enabled")),
+            breakeven_fix_pct=_to_float(_g("breakeven_fix_pct")),
+            trailing_stop_enabled=_to_bool(_g("trailing_stop_enabled")),
+            trailing_activation_pct=_to_float(_g("trailing_activation_pct") if _g("trailing_activation_pct") is not None else _g("trailing_activation")),
+            trailing_stop_pct=_to_float(_g("trailing_stop_pct") if _g("trailing_stop_pct") is not None else _g("trailing_distance")),
+            trailing_update_threshold_pct=_to_float(_g("trailing_update_threshold_pct") if _g("trailing_update_threshold_pct") is not None else _g("trailing_update_threshold")),
+            trailing_tp_only=_to_bool(_g("trailing_tp_only")),
+            confirmation_timeframe=_g("confirmation_timeframe"),
+            trailing_activated=None,
+            sl_moved_to_breakeven=None,
         )
 
     @staticmethod

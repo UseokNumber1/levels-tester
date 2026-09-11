@@ -26,16 +26,19 @@ class BacktestTrade:
     trailing_extreme: Optional[Decimal] = None  # max(HIGH) for LONG, min(LOW) for SHORT
     trailing_current_stop: Optional[Decimal] = None
     trailing_tp_only: bool = False
+    last_update_price: Optional[Decimal] = None  # P_G_V2 base for update threshold
 
     # Breakeven
     breakeven_trigger_pct: Optional[Decimal] = None
     breakeven_lock_pct: Optional[Decimal] = None
     breakeven_active: bool = False
 
-    # Partial Close
+    # Partial Close (P_G_V2 BE-fix: fix% closed at BE-trigger level)
     partial_close_pct: Optional[Decimal] = None  # e.g. 50 means close 50%
-    partial_close_rr: Optional[Decimal] = None    # close at this RR
+    partial_close_rr: Optional[Decimal] = None    # close at this RR (= trigger/sl)
     partial_closed: bool = False
+    partial_fill_price: Optional[Decimal] = None
+    partial_pnl_pct: Optional[Decimal] = None  # pnl% of the fixed fraction
     original_stop_price: Optional[Decimal] = None
 
     # Result
@@ -57,6 +60,7 @@ class BacktestTrade:
 
         is_long = self.side == "LONG"
         risk_distance = abs(self.entry_price - self.stop_price)
+        be_was_active = self.breakeven_active
 
         # --- 1. Check Breakeven ---
         if self.breakeven_trigger_pct is not None and not self.breakeven_active:
@@ -68,10 +72,14 @@ class BacktestTrade:
                 if candle_low <= self.entry_price - trigger_distance:
                     self._activate_breakeven(is_long)
 
-        # --- 2. Check Trailing Stop activation ---
+        # --- 2. Check Trailing Stop activation (P_G_V2: strictly after BE) ---
+        _trailing_can_activate = (
+            self.breakeven_trigger_pct is None or be_was_active
+        )
         if (self.trailing_activation_pct is not None
                 and not self.trailing_activated
-                and self.trailing_stop_pct is not None):
+                and self.trailing_stop_pct is not None
+                and _trailing_can_activate):
             activation_distance = self.entry_price * self.trailing_activation_pct / Decimal(100)
             if is_long:
                 if candle_high >= self.entry_price + activation_distance:
@@ -80,6 +88,7 @@ class BacktestTrade:
                     new_stop = candle_high * (Decimal(1) - self.trailing_stop_pct / Decimal(100))
                     if self.trailing_current_stop is None or new_stop > self.trailing_current_stop:
                         self.trailing_current_stop = new_stop
+                        self.last_update_price = candle_high
             else:
                 if candle_low <= self.entry_price - activation_distance:
                     self.trailing_activated = True
@@ -87,24 +96,49 @@ class BacktestTrade:
                     new_stop = candle_low * (Decimal(1) + self.trailing_stop_pct / Decimal(100))
                     if self.trailing_current_stop is None or new_stop < self.trailing_current_stop:
                         self.trailing_current_stop = new_stop
+                        self.last_update_price = candle_low
 
-        # --- 3. Update Trailing Stop ---
+        # --- 3. Update Trailing Stop (P_G_V2: threshold on price move vs last update) ---
         if self.trailing_activated and self.trailing_stop_pct is not None:
-            threshold = self.trailing_update_threshold_pct or Decimal("0.1")
+            threshold = self.trailing_update_threshold_pct if self.trailing_update_threshold_pct is not None else Decimal("0.5")
             if is_long:
-                if candle_high > (self.trailing_extreme or candle_high):
-                    self.trailing_extreme = candle_high
-                    new_stop = candle_high * (Decimal(1) - self.trailing_stop_pct / Decimal(100))
-                    if (self.trailing_current_stop is None
-                            or new_stop - self.trailing_current_stop >= self.entry_price * threshold / Decimal(100)):
-                        self.trailing_current_stop = new_stop
+                ref_price = candle_high
+                if ref_price > (self.trailing_extreme or ref_price):
+                    if self.last_update_price is not None and self.last_update_price > 0:
+                        move_pct = abs(ref_price - self.last_update_price) / self.last_update_price * Decimal(100)
+                        if move_pct < threshold:
+                            pass
+                        else:
+                            self.trailing_extreme = ref_price
+                            new_stop = ref_price * (Decimal(1) - self.trailing_stop_pct / Decimal(100))
+                            if self.trailing_current_stop is None or new_stop > self.trailing_current_stop:
+                                self.trailing_current_stop = new_stop
+                                self.last_update_price = ref_price
+                    else:
+                        self.trailing_extreme = ref_price
+                        new_stop = ref_price * (Decimal(1) - self.trailing_stop_pct / Decimal(100))
+                        if self.trailing_current_stop is None or new_stop > self.trailing_current_stop:
+                            self.trailing_current_stop = new_stop
+                            self.last_update_price = ref_price
             else:
-                if candle_low < (self.trailing_extreme or candle_low):
-                    self.trailing_extreme = candle_low
-                    new_stop = candle_low * (Decimal(1) + self.trailing_stop_pct / Decimal(100))
-                    if (self.trailing_current_stop is None
-                            or self.trailing_current_stop - new_stop >= self.entry_price * threshold / Decimal(100)):
-                        self.trailing_current_stop = new_stop
+                ref_price = candle_low
+                if ref_price < (self.trailing_extreme or ref_price):
+                    if self.last_update_price is not None and self.last_update_price > 0:
+                        move_pct = abs(ref_price - self.last_update_price) / self.last_update_price * Decimal(100)
+                        if move_pct < threshold:
+                            pass
+                        else:
+                            self.trailing_extreme = ref_price
+                            new_stop = ref_price * (Decimal(1) + self.trailing_stop_pct / Decimal(100))
+                            if self.trailing_current_stop is None or new_stop < self.trailing_current_stop:
+                                self.trailing_current_stop = new_stop
+                                self.last_update_price = ref_price
+                    else:
+                        self.trailing_extreme = ref_price
+                        new_stop = ref_price * (Decimal(1) + self.trailing_stop_pct / Decimal(100))
+                        if self.trailing_current_stop is None or new_stop < self.trailing_current_stop:
+                            self.trailing_current_stop = new_stop
+                            self.last_update_price = ref_price
 
         # --- 4. Partial Close ---
         if (self.partial_close_pct is not None
@@ -176,10 +210,15 @@ class BacktestTrade:
 
     def _do_partial_close(self, price: Decimal, time: datetime) -> None:
         self.partial_closed = True
+        self.partial_fill_price = price
+        # Weighted PnL: this fraction is fixed here (P_G_V2 BE-fix semantics)
+        multiplier = Decimal(1) if self.side == "LONG" else Decimal(-1)
+        if self.entry_price > 0:
+            self.partial_pnl_pct = (price - self.entry_price) * multiplier / self.entry_price * Decimal(100)
         # After partial close, move stop to breakeven for remaining position
         if self.original_stop_price is None:
             self.original_stop_price = self.stop_price
-        lock_distance = self.entry_price * (self.breakeven_lock_pct or Decimal("0.35")) / Decimal(100)
+        lock_distance = self.entry_price * (self.breakeven_lock_pct if self.breakeven_lock_pct is not None else Decimal("0.35")) / Decimal(100)
         if self.side == "LONG":
             new_stop = self.entry_price + lock_distance
             if new_stop > self.stop_price:
@@ -195,6 +234,20 @@ class BacktestTrade:
         self.exit_time = time
         self.exit_reason = reason
         multiplier = Decimal(1) if self.side == "LONG" else Decimal(-1)
-        self.pnl = (price - self.entry_price) * multiplier
+        rest_pnl = (price - self.entry_price) * multiplier
         if self.entry_price > 0:
-            self.pnl_pct = self.pnl / self.entry_price * Decimal(100)
+            rest_pnl_pct = rest_pnl / self.entry_price * Decimal(100)
+        else:
+            rest_pnl_pct = Decimal(0)
+        if self.partial_closed and self.partial_pnl_pct is not None and self.partial_close_pct:
+            fix_frac = self.partial_close_pct / Decimal(100)
+            if fix_frac < 0:
+                fix_frac = Decimal(0)
+            if fix_frac > 1:
+                fix_frac = Decimal(1)
+            self.pnl_pct = fix_frac * self.partial_pnl_pct + (Decimal(1) - fix_frac) * rest_pnl_pct
+            self.pnl = self.pnl_pct / Decimal(100) * self.entry_price
+        else:
+            self.pnl = rest_pnl
+            if self.entry_price > 0:
+                self.pnl_pct = self.pnl / self.entry_price * Decimal(100)

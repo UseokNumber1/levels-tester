@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HourBounce — PnL-отчёт</title>
+<link rel="stylesheet" href="/static/styles.css">
+<style>
+:root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232c;--border:#2a323d;--text:#d7dee8;--dim:#8b96a5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif;padding:0}
+header{display:flex;gap:14px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border)}
+header h1{font-size:15px;margin:0}
+main{padding:12px 16px}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px}
+.filters input,.filters select{background:#0b0e12;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px}
+button.primary{background:#1a3a5c;color:#cfe6ff;border:1px solid #2a5a8c;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px}
+button.primary:disabled{background:#333;color:#777;border-color:#444;cursor:not-allowed}
+button.secondary{background:var(--panel);color:var(--dim);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px}
+.progress{height:18px;background:var(--panel);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin:8px 0;display:none}
+.progress.on{display:block}
+.progress>div{height:100%;background:#1a5a8c;transition:width .3s}
+#status{color:var(--dim);font-size:12px;margin-bottom:8px}
+.wrap{overflow:auto;max-height:calc(100vh - 220px);border:1px solid var(--border);border-radius:8px}
+table{border-collapse:separate;border-spacing:0;font-size:12px;font-family:ui-monospace,monospace;min-width:1200px;width:100%}
+th,td{padding:5px 9px;border-bottom:1px solid var(--border);border-right:1px solid var(--border);text-align:right;white-space:nowrap}
+th{background:var(--panel2);color:var(--dim);position:sticky;top:0;z-index:2}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--panel);z-index:1;max-width:340px;overflow:hidden;text-overflow:ellipsis}
+thead th:first-child{z-index:3}
+tfoot td{background:var(--panel2);font-weight:700;position:sticky;bottom:0}
+tfoot td:first-child{z-index:3}
+.pos{color:#26a69a}.neg{color:#ef5350}.zero{color:#5a636e}
+tr:hover td{background:#1a2230}
+tr.traded td:first-child{border-left:3px solid #f7c948}
+.trdot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f7c948;margin-right:6px}
+.grp td{background:#141b28 !important;font-weight:700;color:var(--dim)}
+.hint{color:var(--dim);font-size:11px;margin-top:8px}
+label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+<h1>PnL-отчёт: сигналы × входы</h1>
+<span style="color:var(--dim);font-size:12px">клетка = PnL% со знаком стороны · 0 = нет входа · подвал = суммы по столбцам</span>
+<span style="margin-left:auto"></span>
+<a href="/hourbounce" style="color:#8ec0ff;font-size:12px">→ Review</a>
+</header>
+<main>
+<div class="filters">
+<input id="f-search" placeholder="Поиск BTC, id..." style="min-width:180px">
+<select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option></select>
+<label style="font-size:11px;color:var(--dim)">с даты<br><input id="f-from" type="date" style="margin-top:2px"></label>
+<label style="font-size:11px;color:var(--dim)">по дату<br><input id="f-to" type="date" style="margin-top:2px"></label>
+<select id="f-limit"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select>
+<label class="chk"><input type="checkbox" id="f-traded"> только отторгованные в БД</label>
+<select id="f-group" title="Группировка строк">
+<option value="none">Без группировки</option>
+<option value="side">По направлению</option>
+<option value="month">По месяцам</option>
+<option value="week">По неделям</option>
+<option value="day">По дням</option>
+</select>
+<button class="primary" id="btn-run">Сформировать</button>
+<button class="secondary" id="btn-csv" disabled>Скачать CSV</button>
+</div>
+<div class="progress" id="prog"><div id="prog-fill" style="width:0%"></div></div>
+<div id="status">Загрузи список и нажми «Сформировать». Первый прогон тянет свечи с Binance, повторный — из кеша.</div>
+<div class="wrap" id="wrap" style="display:none"><table id="tbl"></table></div>
+<div class="hint">EXPIRED считается по последней цене (вход был, выхода нет). Наведи на клетку — увидишь исход (TAKE/STOP/NO_ENTRY/EXPIRED).</div>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let lastData = null;
+const LS_KEY = 'hb-report-settings-v1';
+
+function saveSettings() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      search: $('f-search').value, side: $('f-side').value, limit: $('f-limit').value,
+      from: $('f-from').value, to: $('f-to').value,
+      traded: $('f-traded').checked, group: $('f-group').value,
+    }));
+  } catch (_) {}
+}
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+    if (s.search) $('f-search').value = s.search;
+    if (s.side) $('f-side').value = s.side;
+    if (s.limit) $('f-limit').value = s.limit;
+    if (s.from) $('f-from').value = s.from;
+    if (s.to) $('f-to').value = s.to;
+    $('f-traded').checked = !!s.traded;
+    if (s.group) $('f-group').value = s.group;
+  } catch (_) {}
+}
+['f-search', 'f-side', 'f-limit', 'f-from', 'f-to', 'f-traded', 'f-group'].forEach((id) => {
+  $(id).addEventListener('change', saveSettings);
+});
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || 'request failed');
+  return d;
+}
+
+$('btn-run').onclick = async () => {
+  saveSettings();
+  $('btn-run').disabled = true;
+  $('btn-csv').disabled = true;
+  $('wrap').style.display = 'none';
+  try {
+    const q = new URLSearchParams({ search: $('f-search').value.trim(), side: $('f-side').value, limit: $('f-limit').value });
+    if ($('f-from').value) q.set('date_from', $('f-from').value);
+    if ($('f-to').value) q.set('date_to', $('f-to').value);
+    const s = await api('/api/hourbounce/signals?' + q.toString());
+    let items = s.items || [];
+    if ($('f-traded').checked) items = items.filter((x) => x.status && String(x.status).startsWith('closed_'));
+    const id2arch = {};
+    items.forEach((x) => { id2arch[x.signal_id] = x; });
+    const ids = items.map((x) => x.signal_id);
+    if (!ids.length) { $('status').textContent = 'Нет сигналов под фильтром.'; return; }
+    $('status').textContent = `Сигналов: ${ids.length}. Старт расчёта...`;
+    $('prog').classList.add('on');
+    const { job_id } = await api('/api/hourbounce/report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signal_ids: ids, lookforward: 2000 }),
+    });
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const st = await api(`/api/hourbounce/report/status/${job_id}`);
+      if (st.status === 'failed') throw new Error(st.error || 'job failed');
+      $('prog-fill').style.width = Math.round((st.done / Math.max(1, st.total)) * 100) + '%';
+      $('status').textContent = `Считаю ${st.done}/${st.total}… ${st.current || ''}`;
+      if (st.status === 'completed') break;
+    }
+    const data = await api(`/api/hourbounce/report/result/${job_id}`);
+    // добираем архивные поля из списка сигналов (статус факта)
+    (data.rows || []).forEach((r) => {
+      const a = id2arch[r.signal_id] || {};
+      if (r.arch_status == null && a.status) r.arch_status = a.status;
+      if (!r.traded && a.status && String(a.status).startsWith('closed_')) r.traded = true;
+    });
+    lastData = data;
+    renderTable(data, $('f-group').value);
+    $('btn-csv').disabled = false;
+    const nTr = data.rows.filter((r) => r.traded).length;
+    $('status').textContent = `Готово: ${data.count} сигналов (из них отторговано в БД: ${nTr}). Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
+  } catch (e) {
+    $('status').textContent = 'Ошибка: ' + e.message;
+  } finally {
+    $('btn-run').disabled = false;
+    $('prog').classList.remove('on');
+  }
+};
+
+function groupKey(r, mode) {
+  if (mode === 'side') return r.side || '?';
+  const ds = (r.dt_place || '').slice(0, 10);
+  if (!ds) return 'без даты';
+  if (mode === 'month') return ds.slice(0, 7);
+  if (mode === 'day') return ds;
+  if (mode === 'week') {
+    const d = new Date(ds + 'T00:00:00Z');
+    const th = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    const day = (th.getUTCDay() + 6) % 7;
+    th.setUTCDate(th.getUTCDate() - day + 3);
+    const first = new Date(Date.UTC(th.getUTCFullYear(), 0, 4));
+    const w = 1 + Math.round(((th - first) / 864e5 - 3 + ((first.getUTCDay() + 6) % 7)) / 7);
+    return `${th.getUTCFullYear()}-W${String(w).padStart(2, '0')}`;
+  }
+  return '';
+}
+
+function fmtV(v) {
+  const n = Number(v) || 0;
+  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : 'zero';
+  return { txt: `${n > 0 ? '+' : ''}${n.toFixed(2)}`, cls };
+}
+
+function subtotalRow(label, sums, cols, ncols) {
+  let h = `<tr class="grp"><td>${label}</td>`;
+  for (const c of cols) {
+    const f = fmtV(sums[c]);
+    h += `<td class="${f.cls}">${f.txt}</td>`;
+  }
+  const t = fmtV(sums.TOTAL);
+  h += `<td class="${t.cls}">${t.txt}</td>`;
+  const n = ncols - cols.length - 2;
+  for (let i = 0; i < n; i++) h += '<td></td>';
+  return h + '</tr>';
+}
+
+function renderTable(data, groupMode) {
+  const t = $('tbl');
+  const cols = data.columns;
+  const head2 = `<th title="Реальная сделка в архиве БД">Arch факт</th>`;
+  let h = `<thead><tr><th>Сигнал</th>${head2}${cols.map((c) => `<th>${c}</th>`).join('')}<th>Лучший</th></tr></thead><tbody>`;
+  const groups = {};
+  const order = [];
+  const gkey = (r) => groupMode === 'none' ? '' : groupKey(r, groupMode);
+  for (const r of data.rows) {
+    const k = gkey(r);
+    if (!(k in groups)) { groups[k] = []; order.push(k); }
+    groups[k].push(r);
+  }
+  const ncols = cols.length + 3;
+  for (const k of order) {
+    if (groupMode !== 'none') {
+      const sums = {};
+      cols.forEach((c) => { sums[c] = 0; });
+      sums.TOTAL = 0;
+      groups[k].forEach((r) => {
+        cols.forEach((c) => { sums[c] = Math.round((sums[c] + (Number(((r.cells || {})[c] || {}).pnl) || 0)) * 10000) / 10000; });
+      });
+      sums.TOTAL = Math.round(cols.reduce((a, c) => a + sums[c], 0) * 10000) / 10000;
+      const n = groups[k].length;
+      const nTr = groups[k].filter((r) => r.traded).length;
+      h += subtotalRow(`▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''}`, sums, cols, ncols);
+    }
+    for (const r of data.rows.filter((x) => gkey(x) === k)) {
+      const archTxt = r.traded
+        ? `${r.arch_status || ''} ${r.arch_pnl != null ? `${Number(r.arch_pnl) > 0 ? '+' : ''}${Number(r.arch_pnl).toFixed(2)}%` : ''}`
+        : '—';
+      h += `<tr${r.traded ? ' class="traded"' : ''}><td title="${r.signal_id}">${r.traded ? '<span class="trdot" title="Отторговано в БД"></span>' : ''}${r.symbol} · ${r.side} · ${r.level_price} · ${(r.dt_place || '').slice(0, 16)}</td>`;
+      h += `<td class="${r.traded ? 'pos' : 'zero'}" title="${r.traded ? `Реальная сделка: ${r.arch_status}` : 'В архиве нет закрытой сделки'}">${archTxt}</td>`;
+      let bestCol = '—', bestV = -Infinity;
+      const vals = {};
+      for (const c of cols) {
+        const v = Number((((r.cells || {})[c]) || {}).pnl) || 0;
+        vals[c] = v;
+        if (v > bestV) { bestV = v; bestCol = c; }
+      }
+      const anyTrade = cols.some((c) => vals[c]);
+      for (const c of cols) {
+        const v = vals[c];
+        const cell = ((r.cells || {})[c]) || {};
+        const cls = v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero';
+        const bold = anyTrade && c === bestCol ? 'font-weight:700;' : '';
+        h += `<td class="${cls}" style="${bold}" title="${cell.outcome || ''}">${v > 0 ? '+' : ''}${v.toFixed(2)}</td>`;
+      }
+      const bc = bestV > 0 ? 'pos' : bestV < 0 ? 'neg' : 'zero';
+      h += `<td class="${bc}" style="font-weight:700;" title="Лучший вариант входа/стопа на этом сигнале">${anyTrade ? `${bestCol} ${bestV > 0 ? '+' : ''}${bestV.toFixed(2)}` : '—'}</td></tr>`;
+    }
+  }
+  h += `</tbody><tfoot><tr><td>Σ столбец</td><td></td>`;
+  for (const c of cols) {
+    const v = Number((data.footer || {})[c]) || 0;
+    const cls = v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero';
+    h += `<td class="${cls}">${v > 0 ? '+' : ''}${v.toFixed(2)}</td>`;
+  }
+  const t_ = Number((data.footer || {}).TOTAL) || 0;
+  h += `<td class="${t_ > 0 ? 'pos' : t_ < 0 ? 'neg' : 'zero'}">${t_ > 0 ? '+' : ''}${t_.toFixed(2)}</td></tr></tfoot>`;
+  t.innerHTML = h;
+  $('wrap').style.display = '';
+}
+
+$('f-group').addEventListener('change', () => {
+  saveSettings();
+  if (lastData) renderTable(lastData, $('f-group').value);
+});
+
+loadSettings();
+
+$('btn-csv').onclick = () => {
+  if (!lastData) return;
+  const cols = lastData.columns;
+  const bestOf = (r) => {
+    let bc = '—', bv = -Infinity;
+    for (const c of cols) {
+      const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
+      if (v > bv) { bv = v; bc = c; }
+    }
+    const anyTrade = cols.some((c) => Number(((r.cells || {})[c] || {}).pnl));
+    return anyTrade ? [bc, (bv > 0 ? '+' : '') + bv.toFixed(2)] : ['—', ''];
+  };
+  const lines = [['signal', 'symbol', 'side', 'level', 'dt_place', 'traded', 'arch_status', 'arch_pnl', ...cols, 'best_variant', 'best_pnl'].join(';')];
+  for (const r of lastData.rows) {
+    const [bcol, bpnl] = bestOf(r);
+    lines.push([r.signal_id, r.symbol, r.side, r.level_price, r.dt_place,
+      r.traded ? '1' : '0', r.arch_status || '', r.arch_pnl != null ? String(r.arch_pnl).replace('.', ',') : '',
+      ...cols.map((c) => String(Number(((r.cells || {})[c] || {}).pnl) || 0).replace('.', ',')),
+      bcol, bpnl.replace('.', ',')].join(';'));
+  }
+  lines.push(['TOTAL', '', '', '', '', '', '', '', ...cols.map((c) => String(Number((lastData.footer || {})[c]) || 0).replace('.', ',')), String(lastData.footer.TOTAL).replace('.', ',')].join(';'));
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'hourbounce_pnl.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>

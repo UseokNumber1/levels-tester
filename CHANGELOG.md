@@ -1,6 +1,46 @@
 # Changelog
 
-## v1.0.2 (2026-09-05)
+## v1.1.0 (2026-09-11)
+
+### Added
+- **HourBounce Review Lite** (`web/hourbounce.html`, `web/hourbounce.js`): Interactive replay review of bounce signals from PGv2 archive with signal table (name, symbol, side, level, date, volume, NATR, archived TP/SL, archived outcome), interactive M5 chart with touch/confirm/entry/exit markers, trail line, stepper (touch → confirm → entry → trail/SL), metrics (R, max+, MAE/MFE), event table, and 3×3 matrix mode (T1/T2/T3 × SL1/SL2/SL3) with sync crosshair and aggregate stats
+- **Signal-level ExecParams** (`src/level_tester/backtester/hourbounce.py`): `ExecParams` dataclass with SL, TP, Breakeven (trigger/lock), Trailing (activation/distance/threshold, tp_only), SL source tracking (archive/config); `exec_from_signal()` reconstructs per-signal params from PGv2 archive (handles mutated SL from BE/trailing via config fallback)
+- **PGv2 1:1 execution mode** (`entry_code="PG"`): Engine replicates PGv2 `ConfirmationLoop` logic — touch candle counts as first confirmation, `required_bars` consecutive directional closes (close > open for LONG, close < open for SHORT), entry on next open, BE → trail activation (gated by BE) → trail update (threshold) → stop → fixed TP; BE `breakeven_fix_pct` (partial close) not modelled in price replay
+- **Signal archive metadata** (`SignalEntry` extended): `confirmation_timeframe`, `trailing_activated`, `sl_moved_to_breakeven`; `exec_from_signal()` infers SL mutation state and falls back to config `stop_loss_pct` (default 1.0%) when SL was moved by BE/trail
+- **PnL Report** (`/report`, `web/report.html`, `api/hourbounce/report`): Background job over selected signals × 9 combinations (T1/T2/T3 × SL1/SL2/SL3); per-cell PnL% with side sign (green/red), row best-variant highlight, column footer sums + total; group-by mode (none / side / month / week / day) with per-group subtotals; filter "only traded in DB" (archived `closed_*`); CSV export with `traded/arch_status/arch_pnl/best_variant/best_pnl`; settings persist in `localStorage`
+- **HourBounce Review Lite UI** (`web/hourbounce.html`, `web/hourbounce.js`): Matrix/single toggle, execution mode toggle (Grid SL / Signal PGv2 1:1), forced refresh button, BE marker on chart (dashed yellow), execution params panel, date-from/to filters, sort (date/name/symbol), sync crosshair in matrix, CSV export per signal, version badge from `/api/version`
+- **Archive trades lookup** (`_hb_archive_trades()`): Batch fetch `closed_*` statuses from `signal_archive.db`; `traded` flag, `arch_status`, `arch_pnl` attached to report rows; UI shows "Arch факт" column with gold dot ● for traded signals
+- **Watch start anchor** (`confirmation_waiting_started_at`): Replay scans from `max(dt_place, watch_start)` so PGv2 restarts don't phantom-touch old candles; UI shows "watch_start" alongside `touch_ref`
+- **Archive metadata enrichment** (`/api/hourbounce/signals`): `required_bars` from `confirmation_bars_required`, `watch_start` from `confirmation_waiting_started_at`, `pg_available` flag for Signal mode availability
+- **HourBounce engine config** (`DEFAULT_CONFIG`): `life_window_t=None` (unbounded — finds nearest actual outcome), `confirm_window_w=20`, PGv2 SL/TP/BE/trail defaults
+- **Database schema** (`HbReviewRow`): `hb_reviews` table caches 9-cell payloads per (signal_id, config_fp, lookforward); keyed by `window_last`/`window_count` (not tail), auto-invalidated on config change or gaps inside life window
+- **Candle cache** (`load_candles_cached`): M5 candles from DB gaps, Binance fill for holes, end capped at last closed candle (no forming bar)
+- **Tests**: 6 new PGv2 scenarios (req=0/1/2, red touch reset, doji, T3 primary), `test_exec_from_signal_mapping` with mutated/pristine SL, 3 new store tests (holes, roundtrip, payload), 82 total tests pass
+
+### Changed
+- **HourBounce engine**: Removed 24h life window (`life_window_t=None`), added PGv2 execution mode (`entry_code="PG"` with `pg_required`), BE/trail gating, trail threshold default 0.5%, trail TP only flag
+- **SignalReader**: Added `confirmation_timeframe`, `trailing_activated`, `sl_moved_to_breakeven` fields; `_read_archive` populates new fields from metadata
+- **ExecParams**: Added `sl_source` tracking ("archive"/"config"), `trail_threshold_pct` (default 0.5% PGv2), `trail_tp_only`
+- **API**: `/api/hourbounce/review` accepts `mode=grid|signal`; `/api/hourbounce/matrix` accepts `refresh`; `/api/hourbounce/signals` adds `date_from`/`date_to`, `sort` (date_desc/asc, name_asc/desc, symbol_asc), `pg_available` flag; `/api/hourbounce/export` includes `required_bars` in payload
+- **Report API**: `_run_hb_report` attaches `traded`/`arch_status`/`arch_pnl` from `_hb_archive_trades`; rows include `traded`/`arch_status`/`arch_pnl`; CSV adds `traded/arch_status/arch_pnl/best_variant/best_pnl`
+- **Report UI** (`web/report.html`): Filter "only traded in DB" (checkbox), group-by select (none/side/month/week/day) with per-group subtotals and traded counts; table shows "Arch факт" column with gold dot ● for traded; "Лучший" column bold for row best; CSV exports `traded/arch_status/arch_pnl/best_variant/best_pnl`; settings (search, side, limit, dates, traded, group) persist in `localStorage`; filter inputs (date from/to, traded checkbox, group select); header adds "→ PnL-отчёт" link
+- **HourBounce UI** (`web/hourbounce.html`): Mode toggle (Matrix / Signal), execution mode toggle (Grid / Signal PG 1:1), refresh button, exec params bar (SL/TP/BE/trail), BE dashed yellow line + marker on chart, stepper 4 shows TP/trail/SL, date filters, sort dropdown (date/name/symbol), version badge from `/api/version`, yellow version text in header
+- **Database**: `HbReviewRow` table added, `ensure_schema` creates on startup
+- **New files**: `src/level_tester/backtester/hourbounce.py`, `hourbounce_store.py`, `db_variant.py`; `web/hourbounce.html`, `hourbounce.js`, `report.html`; `scripts/validate_vs_archive.py`; `tests/test_hourbounce.py`, `test_hb_store.py`; `web/report.html`
+- **Documentation**: `tz/` folder with PGv2 spec drafts; `docs/` with analysis notes
+
+### Fixed
+- **PGv2 SL fallback**: `exec_from_signal` now uses config `stop_loss_pct=1.0%` when archive SL was moved by BE/trail (detected via `trailing_activated` / `sl_moved_to_breakeven`); `sl_source` tracks origin ("archive"/"config")
+- **PGv2 confirmation logic**: Touch candle counts as first confirmation (req=2 → touch + 1 more); red touch resets counter; req=0 market-on-touch with direction; req=1 needs 1 green after touch; doji resets; matches PGv2 `ConfirmationLoop` (touch candle included in consecutive count)
+- **Report CSV**: Fixed duplicate `anyTrade` declaration; `bestOf` in CSV uses per-row `bestOf` helper
+- **Report JS**: Removed duplicate `anyTrade` declaration; `bestOf` helper for CSV
+- **PGv2 entry code "PG"**: T1/T2/T3 entry codes still work; "PG" uses archive params + PGv2 rules
+- **SignalReader**: Added `confirmation_timeframe`, `trailing_activated`, `sl_moved_to_breakeven` to `_read_archive` and `_row_to_signal`
+- **ExecParams**: `trail_threshold_pct` default 0.5 (PGv2 default); `trail_tp_only` flag
+- **SignalReader**: `_read_trading` sets new fields to `None` for trading.db (no mutation state)
+
+### Removed
+- None (backwards compatible — existing grid T1/T2/T3 × SL1/SL2/SL3 still works)
 
 ### Changed
 - Patch version bump (1.0.1 → 1.0.2)

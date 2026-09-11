@@ -53,6 +53,27 @@ class CandleRow(Base):
     __table_args__ = (UniqueConstraint("instrument_id", "timeframe", "open_time"),)
 
 
+class HbReviewRow(Base):
+    """Кеш результата HourBounce-реплея: одна строка = сигнал × конфиг движка.
+
+    Хранит готовые ячейки матрицы (touch/entry/exit/события) — свечи лежат
+    отдельно в candles (5m) и добираются по диапазону. config_fp меняется
+    при смене параметров движка и инвалидирует старые строки.
+    """
+
+    __tablename__ = "hb_reviews"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(128), index=True)
+    symbol: Mapped[str] = mapped_column(String(30), index=True)
+    config_fp: Mapped[str] = mapped_column(String(64))
+    lookforward: Mapped[int] = mapped_column(Integer, default=1000)
+    payload_json: Mapped[str] = mapped_column(Text)
+    candles_from: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    candles_to: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("signal_id", "config_fp", "lookforward"),)
+
+
 class RunRow(Base):
     __tablename__ = "runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

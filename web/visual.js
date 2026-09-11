@@ -29,6 +29,8 @@ const state = {
   detailCount: 0,
   detailBars: [],
   detailLevelLines: [],
+  detailTradeLevelLines: [],
+  detailTrailingStopLine: null,
   tradeLevelLines: [],
   trailingStopLine: null,
   trailingStopActivated: false,
@@ -38,6 +40,13 @@ const state = {
   tickSize: '0.01',
   tradeVisualParams: null,
   pivotMarkers: null,
+  tradeMarkers: null,
+  detailTradeMarkers: null,
+  lastTradeEventSeq: 0,
+  tradeEventMarkers: [],
+  detailTradeEventMarkers: [],
+  pauseOnEvent: false,
+  pendingPauseEvent: null,
 };
 
 // === Utility Functions ===
@@ -221,7 +230,10 @@ function resetDetailChart() {
   state.detailDrawnTime = undefined;
   state.detailCount = 0;
   state.detailBars = [];
+  state.lastTradeEventSeq = 0;
   clearDetailLevelLines();
+  clearDetailTradeLevelLines();
+  setDetailTradeMarkers([]);
   destroyDetailChart();
   const container = $('detail-chart');
   container.classList.add('detail-waiting');
@@ -256,6 +268,16 @@ function clearTradeLevelLines() {
   if (!state.candleSeries || !state.tradeLevelLines) return;
   state.tradeLevelLines.forEach(line => state.candleSeries.removePriceLine(line));
   state.tradeLevelLines = [];
+}
+
+function clearDetailTradeLevelLines() {
+  if (!state.detailSeries || !state.detailTradeLevelLines) return;
+  state.detailTradeLevelLines.forEach(line => state.detailSeries.removePriceLine(line));
+  state.detailTradeLevelLines = [];
+  if (state.detailTrailingStopLine && state.detailSeries) {
+    state.detailSeries.removePriceLine(state.detailTrailingStopLine);
+    state.detailTrailingStopLine = null;
+  }
 }
 
 function renderTradeLevels(params) {
@@ -343,6 +365,131 @@ function renderTradeLevels(params) {
   clearTrailingStopLine();
   state.highestPriceSinceEntry = Number(params.entry_price) || 0;
   state.lowestPriceSinceEntry = Number(params.entry_price) || 0;
+}
+
+function renderDetailTradeLevels(params) {
+  if (!params || !state.detailSeries || !state.detailActive) return;
+  clearDetailTradeLevelLines();
+
+  const isLong = params.side === 'LONG';
+  const colorEntry = '#4CAF50';
+  const colorSL = '#f44336';
+  const colorTP = '#2196F3';
+  const colorTrail = '#FF9800';
+  const colorBE = '#FFEB3B';
+
+  // Entry line
+  state.detailTradeLevelLines.push(
+    state.detailSeries.createPriceLine({
+      price: params.entry_price,
+      color: colorEntry,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'Entry',
+    })
+  );
+
+  // Stop Loss
+  state.detailTradeLevelLines.push(
+    state.detailSeries.createPriceLine({
+      price: params.stop_price,
+      color: colorSL,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'SL',
+    })
+  );
+
+  // Take Profit
+  state.detailTradeLevelLines.push(
+    state.detailSeries.createPriceLine({
+      price: params.take_price,
+      color: colorTP,
+      lineWidth: 2,
+      lineStyle: 0,
+      axisLabelVisible: true,
+      title: 'TP',
+    })
+  );
+
+  // Trailing Stop activation
+  if (params.trailing?.trailing_stop_pct && params.trailing?.trailing_activation_pct) {
+    const trailActivation = isLong
+      ? params.entry_price * (1 + params.trailing.trailing_activation_pct / 100)
+      : params.entry_price * (1 - params.trailing.trailing_activation_pct / 100);
+    state.detailTradeLevelLines.push(
+      state.detailSeries.createPriceLine({
+        price: trailActivation,
+        color: colorTrail,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: 'Trail Activate',
+      })
+    );
+  }
+
+  // Breakeven
+  if (params.breakeven?.breakeven_trigger_pct && params.breakeven?.breakeven_lock_pct) {
+    const beLevel = isLong
+      ? params.entry_price * (1 + params.breakeven.breakeven_lock_pct / 100)
+      : params.entry_price * (1 - params.breakeven.breakeven_lock_pct / 100);
+    state.detailTradeLevelLines.push(
+      state.detailSeries.createPriceLine({
+        price: beLevel,
+        color: colorBE,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: 'BE',
+      })
+    );
+  }
+}
+
+function updateDetailTrailingStop(params, currentPrice) {
+  if (!params || !state.detailSeries || !state.detailActive) return;
+  if (!params.trailing?.trailing_stop_pct || !params.trailing?.trailing_activation_pct) return;
+
+  const isLong = params.side === 'LONG';
+  const stopPct = params.trailing.trailing_stop_pct;
+
+  // Activation check
+  const activationPct = params.trailing.trailing_activation_pct;
+  const activationPrice = isLong
+    ? params.entry_price * (1 + activationPct / 100)
+    : params.entry_price * (1 - activationPct / 100);
+  const isActivated = isLong
+    ? currentPrice >= activationPrice
+    : currentPrice <= activationPrice;
+  if (!isActivated) return;
+
+  // Compute trailing stop price based on best price since entry
+  const refPrice = isLong ? state.highestPriceSinceEntry : state.lowestPriceSinceEntry;
+  let newStopPrice = isLong
+    ? refPrice * (1 - stopPct / 100)
+    : refPrice * (1 + stopPct / 100);
+  if (isLong && newStopPrice < params.stop_price) newStopPrice = params.stop_price;
+  if (!isLong && newStopPrice > params.stop_price) newStopPrice = params.stop_price;
+
+  if (!state.detailTrailingStopLine) {
+    state.detailTrailingStopLine = state.detailSeries.createPriceLine({
+      price: newStopPrice,
+      color: '#FF9800',
+      lineWidth: 2,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title: 'Trailing SL',
+    });
+  } else {
+    const currentStop = state.detailTrailingStopLine.options().price;
+    const shouldUpdate = isLong ? newStopPrice > currentStop : newStopPrice < currentStop;
+    if (shouldUpdate) {
+      state.detailTrailingStopLine.applyOptions({ price: newStopPrice });
+    }
+  }
 }
 
 function clearTrailingStopLine() {
@@ -490,6 +637,158 @@ function setPivotMarkers(markers) {
   state.pivotMarkers.setMarkers(markers);
 }
 
+// === Trade Event Markers (ENTRY / EXIT) ===
+function setTradeMarkers(markers) {
+  if (!state.candleSeries) return;
+  if (!state.tradeMarkers) {
+    state.tradeMarkers = LightweightCharts.createSeriesMarkers(state.candleSeries, []);
+  }
+  state.tradeEventMarkers = markers || [];
+  state.tradeMarkers.setMarkers(state.tradeEventMarkers);
+}
+
+function setDetailTradeMarkers(markers) {
+  if (!state.detailSeries || !state.detailActive) return;
+  if (!state.detailTradeMarkers) {
+    state.detailTradeMarkers = LightweightCharts.createSeriesMarkers(state.detailSeries, []);
+  }
+  state.detailTradeEventMarkers = markers || [];
+  state.detailTradeMarkers.setMarkers(state.detailTradeEventMarkers);
+}
+
+function clearTradeEventMarkers() {
+  state.tradeEventMarkers = [];
+  state.detailTradeEventMarkers = [];
+  if (state.tradeMarkers && state.candleSeries) {
+    state.tradeMarkers.setMarkers([]);
+  }
+  if (state.detailTradeMarkers && state.detailSeries) {
+    state.detailTradeMarkers.setMarkers([]);
+  }
+}
+
+function eventBarTimeMs(event) {
+  if (!event) return null;
+  const payload = event.payload || {};
+  if (event.event_type === 'trade.opened') {
+    return payload.entry_time ? new Date(payload.entry_time).getTime() : null;
+  }
+  if (event.event_type === 'trade.closed') {
+    return payload.exit_time ? new Date(payload.exit_time).getTime() : null;
+  }
+  return null;
+}
+
+function findBarInCandles(candles, targetMs) {
+  if (!targetMs || !candles || !candles.length) return null;
+  const targetSec = Math.floor(targetMs / 1000);
+  // Prefer the bar at or just after the event time on the same timeframe
+  const onOrAfter = candles.find(c => Math.floor(new Date(c.open_time).getTime() / 1000) >= targetSec);
+  if (onOrAfter) {
+    return {
+      time: Math.floor(new Date(onOrAfter.open_time).getTime() / 1000),
+      candle: onOrAfter,
+    };
+  }
+  const last = candles[candles.length - 1];
+  return {
+    time: Math.floor(new Date(last.open_time).getTime() / 1000),
+    candle: last,
+  };
+}
+
+function detectTradeEvents(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.events) || !snapshot.events.length) return null;
+  const currentSeq = snapshot.cursor ? snapshot.cursor.sequence : -1;
+  // Only consider events up to current cursor
+  const candidates = snapshot.events.filter(ev =>
+    (ev.event_type === 'trade.opened' || ev.event_type === 'trade.closed') &&
+    typeof ev.sequence === 'number' && ev.sequence <= currentSeq
+  );
+  if (!candidates.length) return null;
+  // Find first unprocessed event
+  const fresh = candidates.find(ev => ev.sequence > state.lastTradeEventSeq);
+  if (!fresh) return null;
+  return fresh;
+}
+
+function buildTradeEventMarkers(snapshot, isDetail = false) {
+  if (!snapshot || !Array.isArray(snapshot.events)) return [];
+  const candles = isDetail
+    ? (snapshot.detail_candles || [])
+    : (snapshot.master_candles || []);
+  const currentSeq = snapshot.cursor ? snapshot.cursor.sequence : -1;
+  const events = snapshot.events.filter(ev =>
+    (ev.event_type === 'trade.opened' || ev.event_type === 'trade.closed') &&
+    typeof ev.sequence === 'number' && ev.sequence <= currentSeq
+  );
+  const markers = [];
+  for (const ev of events) {
+    const payload = ev.payload || {};
+    const eventMs = eventBarTimeMs(ev);
+    const found = findBarInCandles(candles, eventMs);
+    if (!found) continue;
+    if (ev.event_type === 'trade.opened') {
+      const isLong = String(payload.side || '').toUpperCase() === 'LONG';
+      markers.push({
+        time: found.time,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#198754' : '#ee6c4d',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: `ENTRY @${fmtPrice(payload.entry_price)}`,
+      });
+    } else {
+      const reason = String(payload.exit_reason || 'exit').toLowerCase();
+      const isWin = parseFloat(payload.pnl || '0') > 0;
+      const colorByReason = {
+        take_profit: '#2196F3',
+        stop_loss: '#f44336',
+        trailing_stop: '#FF9800',
+        breakeven: '#FFEB3B',
+      }[reason] || (isWin ? '#2196F3' : '#f44336');
+      markers.push({
+        time: found.time,
+        position: isWin ? 'aboveBar' : 'belowBar',
+        color: colorByReason,
+        shape: isWin ? 'arrowDown' : 'arrowUp',
+        text: `${reason.toUpperCase()} @${fmtPrice(payload.exit_price)}`,
+      });
+    }
+  }
+  // Sort by time asc (required by lightweight-charts)
+  markers.sort((a, b) => a.time - b.time);
+  return markers;
+}
+
+function describeTradeEvent(event) {
+  if (!event) return null;
+  const payload = event.payload || {};
+  if (event.event_type === 'trade.opened') {
+    return {
+      kind: 'entry',
+      title: '▶ ВХОД В СДЕЛКУ',
+      detail: `${payload.side || ''} @ ${fmtPrice(payload.entry_price)} · SL ${fmtPrice(payload.stop_price)} · TP ${fmtPrice(payload.take_price)}`,
+    };
+  }
+  if (event.event_type === 'trade.closed') {
+    const reason = String(payload.exit_reason || 'exit').toLowerCase();
+    const pnl = parseFloat(payload.pnl || '0');
+    const reasonLabel = {
+      take_profit: 'ТЕЙК-ПРОФИТ',
+      stop_loss: 'СТОП-ЛОСС',
+      trailing_stop: 'ТРЕЙЛИНГ-СТОП',
+      breakeven: 'БЕЗУБЫТОК',
+    }[reason] || reason.toUpperCase();
+    return {
+      kind: 'exit',
+      title: `${pnl >= 0 ? '✔' : '✖'} ВЫХОД ИЗ СДЕЛКИ · ${reasonLabel}`,
+      detail: `Цена ${fmtPrice(payload.exit_price)} · PnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`,
+      pnl,
+    };
+  }
+  return null;
+}
+
 // === Chart Synchronization ===
 function syncChartToCursor(snapshot) {
   initChart();
@@ -547,6 +846,9 @@ function syncChartToCursor(snapshot) {
   // Render trade visual levels
   if (state.tradeVisualParams) {
     renderTradeLevels(state.tradeVisualParams);
+    if (state.detailActive) {
+      renderDetailTradeLevels(state.tradeVisualParams);
+    }
 
     // Update trailing stop on every candle (only after entry price reached)
     if (snapshot.cursor) {
@@ -557,6 +859,9 @@ function syncChartToCursor(snapshot) {
         // Track prices only after entry is reached
         if (currentPrice >= entryPrice || currentPrice <= entryPrice) {
           updateTrailingStop(state.tradeVisualParams, currentPrice);
+          if (state.detailActive) {
+            updateDetailTrailingStop(state.tradeVisualParams, currentPrice);
+          }
         }
       }
     }
@@ -583,6 +888,14 @@ function syncChartToCursor(snapshot) {
     shape: pivot.kind === 'high' ? 'arrowDown' : 'arrowUp',
     text: pivot.kind,
   })));
+
+  // Render trade event markers (ENTRY / EXIT) when in trade-visual mode
+  if (state.tradeVisualParams) {
+    setTradeMarkers(buildTradeEventMarkers(snapshot, false));
+    if (state.detailActive) {
+      setDetailTradeMarkers(buildTradeEventMarkers(snapshot, true));
+    }
+  }
 }
 
 // === Detail Candles ===
@@ -656,6 +969,11 @@ async function animateDetailCandles(candles, startMs, endMs, snapshot) {
   
   enablePriceAutoScale(state.detailSeries);
   scrollChartToRight(state.detailChart);
+
+  // Render trade levels on detail chart (Entry/SL/TP) when active
+  if (state.tradeVisualParams) {
+    renderDetailTradeLevels(state.tradeVisualParams);
+  }
 }
 
 // === Render Snapshot ===
@@ -776,6 +1094,24 @@ async function autoPlayStep() {
         }
       }
     }
+
+    // Detect trade events (ENTRY / EXIT) and pause on each
+    if (state.tradeVisualParams && state.pauseOnEvent) {
+      const tradeEvent = detectTradeEvents(snapshot);
+      if (tradeEvent) {
+        const desc = describeTradeEvent(tradeEvent);
+        state.lastTradeEventSeq = tradeEvent.sequence;
+        if (desc) {
+          const isExit = desc.kind === 'exit';
+          showHint(`${desc.title}\n${desc.detail}`, isExit);
+          // On exit we freeze the replay; user resumes manually
+          if (isExit) {
+            stopAnimation();
+            return;
+          }
+        }
+      }
+    }
     
     if (snapshot.status === 'completed') {
       stopAnimation();
@@ -819,7 +1155,11 @@ async function command(name) {
     if (name === 'step' && snapshot.cursor) {
       await syncDetail(snapshot);
     }
-    if (name === 'reset') resetDetailChart();
+    if (name === 'reset') {
+      state.lastTradeEventSeq = 0;
+      setTradeMarkers([]);
+      resetDetailChart();
+    }
   } catch (error) {
     alert(error.message);
   }
@@ -912,6 +1252,7 @@ async function init() {
   }
   
   state.tradeVisualParams = params;
+  state.pauseOnEvent = true;
   await initVisualMode(params);
 }
 

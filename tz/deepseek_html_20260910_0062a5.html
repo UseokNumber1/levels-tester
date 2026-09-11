@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>HourBounce Replay — прототип карточки</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c232c; --border:#2a323d;
+    --text:#d7dee8; --text-dim:#8b96a5; --accent:#ff9f43;
+    --take:#26a69a; --stop:#ef5350; --noentry:#6b7280; --expired:#f7c948;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:13px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:16px;padding:14px 20px;
+         border-bottom:1px solid var(--border);position:sticky;top:0;
+         background:var(--bg);z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .sub{color:var(--text-dim);font-size:12px}
+  header .sub b{color:var(--text);font-weight:600}
+  header .right{margin-left:auto;display:flex;align-items:center;gap:10px;
+                font-size:12px;color:var(--text-dim)}
+  header .right label{display:flex;align-items:center;gap:6px;cursor:pointer}
+  .matrix{display:grid;grid-template-columns:56px repeat(3,minmax(340px,1fr));
+          gap:12px;padding:16px}
+  .col-head{text-align:center;font-weight:600;color:var(--text-dim);
+            padding:4px 0;font-size:11px;letter-spacing:.06em;
+            text-transform:uppercase}
+  .row-head{writing-mode:vertical-rl;transform:rotate(180deg);
+            display:flex;align-items:center;justify-content:center;
+            font-size:11px;color:var(--text-dim);font-weight:600;
+            letter-spacing:.08em;text-transform:uppercase;
+            border-right:1px dashed var(--border);padding:8px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+        overflow:hidden;display:flex;flex-direction:column}
+  .card-head{display:flex;align-items:center;justify-content:space-between;
+             padding:7px 10px;background:var(--panel-2);
+             border-bottom:1px solid var(--border);font-size:12px}
+  .card-head .ttl{color:var(--text-dim);
+                  font-family:ui-monospace,Menlo,monospace}
+  .badge{font-size:10px;font-weight:700;letter-spacing:.06em;
+         padding:2px 8px;border-radius:10px;color:#0b0e12}
+  .badge.take{background:var(--take)}
+  .badge.stop{background:var(--stop);color:#fff}
+  .badge.noentry{background:var(--noentry);color:#fff}
+  .badge.expired{background:var(--expired)}
+  .chart-wrap{position:relative;height:210px}
+  .chart{position:absolute;inset:0}
+  .overlay{position:absolute;inset:0;pointer-events:none}
+  .stepper{display:flex;align-items:center;gap:4px;padding:7px 10px;
+           background:var(--panel-2);border-top:1px solid var(--border);
+           font-size:10.5px}
+  .step{flex:1;display:flex;align-items:center;gap:5px;color:var(--text-dim)}
+  .step .dot{width:15px;height:15px;border-radius:50%;background:#0b0e12;
+             border:1px solid var(--border);display:flex;align-items:center;
+             justify-content:center;font-size:9px;font-weight:700;flex:0 0 auto}
+  .step.on{color:var(--text)}
+  .step.on .dot{background:var(--accent);color:#0b0e12;border-color:var(--accent)}
+  .step.na .dot{color:#3a434f}
+  .step.done-take .dot{background:var(--take);color:#0b0e12;border-color:var(--take)}
+  .step.done-stop .dot{background:var(--stop);color:#fff;border-color:var(--stop)}
+  .step.done-noentry .dot{background:var(--noentry);color:#fff;border-color:var(--noentry)}
+  .step-line{flex:0 0 10px;height:1px;background:var(--border)}
+  .metrics{display:flex;justify-content:space-between;padding:6px 10px;
+           border-top:1px solid var(--border);font-size:10.5px;
+           color:var(--text-dim);font-family:ui-monospace,Menlo,monospace}
+  .metrics b{color:var(--text);font-weight:600}
+  .legend{position:fixed;bottom:14px;left:14px;background:rgba(22,27,34,.95);
+          border:1px solid var(--border);border-radius:8px;padding:8px 12px;
+          font-size:11px;display:flex;gap:14px;backdrop-filter:blur(6px)}
+  .legend div{display:flex;align-items:center;gap:6px}
+  .swatch{width:14px;height:3px;border-radius:2px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>HourBounce Replay</h1>
+  <span class="sub">
+    сигнал <b>BTCUSDT #48217</b> · level <b>100.00</b> · BUY ·
+    конфиг <b>v3</b> · trail activate <b>+1%</b> / distance <b>1%</b>
+  </span>
+  <span class="right">
+    <label><input type="checkbox" id="sync" checked> sync crosshair</label>
+  </span>
+</header>
+
+<div class="matrix" id="matrix"></div>
+
+<div class="legend">
+  <div><span class="swatch" style="background:#ff9f43"></span> H1 уровень</div>
+  <div><span class="swatch" style="background:#ef5350"></span> SL</div>
+  <div><span class="swatch" style="background:#26a69a"></span> trail-линия</div>
+  <div><span class="swatch" style="background:#2962ff"></span> подтверждающая свеча</div>
+</div>
+
+<script>
+const LC = LightweightCharts;
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;
+  return((t^t>>>14)>>>0)/4294967296;};}
+
+const closePath = [
+  [0,102.80],[20,100.90],[30,100.30],
+  [32, 99.98],[33,100.10],[34,100.45],
+  [40,101.20],[48,102.10],[58,101.00],[69,100.60],
+];
+function closeAt(i){
+  for(let k=0;k<closePath.length-1;k++){
+    const[i0,p0]=closePath[k],[i1,p1]=closePath[k+1];
+    if(i>=i0&&i<=i1){const t=(i-i0)/(i1-i0||1);return p0+(p1-p0)*t;}
+  }
+  return closePath.at(-1)[1];
+}
+const lowOverride  = {33:99.40, 37:99.55};
+const highOverride = {48:102.10};
+
+function genCandles(){
+  const rng=mulberry32(20260910);
+  const startSec=Math.floor(Date.UTC(2026,8,10,8,0)/1000);
+  const out=[];
+  for(let i=0;i<70;i++){
+    const time=startSec+i*300, c=closeAt(i);
+    const o=i===0?c+0.15:out[i-1].close;
+    let h=Math.max(o,c)+rng()*0.18+0.03;
+    let l=Math.min(o,c)-rng()*0.18-0.03;
+    if(i===32){l=99.95;h=Math.max(o,c)+0.05;}
+    if(lowOverride[i]!=null)  l=Math.min(l,lowOverride[i]);
+    if(highOverride[i]!=null) h=Math.max(h,highOverride[i]);
+    out.push({time,open:+o.toFixed(4),high:+h.toFixed(4),
+              low:+l.toFixed(4),close:+c.toFixed(4)});
+  }
+  return out;
+}
+const CANDLES=genCandles();
+const LEVEL=100.00;
+const SL_SIZES={1:0.5,2:1.0,3:1.5};
+
+const T={
+  1:{entryIdx:32,entryPrice:100.00,confirmIdx:[]},
+  2:{entryIdx:34,entryPrice:100.10,confirmIdx:[33]},
+  3:{entryIdx:35,entryPrice:100.45,confirmIdx:[33,34]},
+};
+const TRAIL_PEAK=102.10;
+const TRAIL_EXIT=+(TRAIL_PEAK*0.99).toFixed(4);
+const TRAIL_EXIT_IDX=58;
+
+function buildCell(entryType,slIdx){
+  const t=T[entryType];
+  const slPct=SL_SIZES[slIdx]/100;
+  const slPrice=+(t.entryPrice*(1-slPct)).toFixed(4);
+
+  let outcome,exitIdx,exitPrice,ambiguous=false;
+  if(entryType===1&&slIdx===1){ outcome='STOP'; exitIdx=33; exitPrice=slPrice; }
+  else if(entryType===2&&slIdx===1){ outcome='STOP'; exitIdx=37; exitPrice=slPrice; }
+  else if(entryType===3&&slIdx===1){ outcome='STOP'; exitIdx=37; exitPrice=slPrice; }
+  else { outcome='TAKE'; exitIdx=TRAIL_EXIT_IDX; exitPrice=TRAIL_EXIT; }
+
+  let trailPath=[];
+  if(outcome==='TAKE'){
+    const activatePrice=+(t.entryPrice*1.01).toFixed(4);
+    let activateIdx=null;
+    for(let i=t.entryIdx;i<CANDLES.length;i++){
+      if(CANDLES[i].high>=activatePrice){activateIdx=i;break;}
+    }
+    if(activateIdx!=null){
+      const peak=Math.max(...CANDLES.slice(t.entryIdx,activateIdx+1).map(c=>c.high));
+      trailPath.push({time:CANDLES[activateIdx].time,value:+(peak*0.99).toFixed(4)});
+      const steps=4;
+      for(let s=1;s<=steps;s++){
+        const idx=Math.floor(activateIdx+(TRAIL_EXIT_IDX-activateIdx)*s/(steps+1));
+        const pk=Math.max(...CANDLES.slice(t.entryIdx,idx+1).map(c=>c.high));
+        const tr=+(pk*0.99).toFixed(4);
+        const last=trailPath[trailPath.length-1];
+        if(CANDLES[idx].time>last.time&&tr>=last.value)
+          trailPath.push({time:CANDLES[idx].time,value:tr});
+      }
+      const last=trailPath[trailPath.length-1];
+      if(CANDLES[TRAIL_EXIT_IDX].time>last.time)
+        trailPath.push({time:CANDLES[TRAIL_EXIT_IDX].time,value:TRAIL_EXIT});
+    }
+  }
+  return {entryType,slIdx,entryIdx:t.entryIdx,entryPrice:t.entryPrice,
+          slPrice,outcome,exitIdx,exitPrice,confirmIdx:t.confirmIdx,
+          trailPath,ambiguous};
+}
+
+const charts=[];
+function renderCard(parent,cell){
+  const card=document.createElement('div');card.className='card';
+
+  const head=document.createElement('div');head.className='card-head';
+  const slPct=SL_SIZES[cell.slIdx];
+  const badgeCls=cell.outcome.toLowerCase().replace('_','');
+  head.innerHTML=`
+    <span class="ttl">T${cell.entryType} · SL${cell.slIdx} (${slPct}%)</span>
+    <span class="badge ${badgeCls}">${cell.outcome==='NO_ENTRY'?'NO ENTRY':cell.outcome}</span>`;
+  card.appendChild(head);
+
+  const wrap=document.createElement('div');wrap.className='chart-wrap';
+  const chartDiv=document.createElement('div');chartDiv.className='chart';
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('class','overlay');
+  wrap.appendChild(chartDiv);wrap.appendChild(svg);
+  card.appendChild(wrap);
+
+  const steps=document.createElement('div');steps.className='stepper';
+  const metrics=document.createElement('div');metrics.className='metrics';
+  card.appendChild(steps);card.appendChild(metrics);
+  parent.appendChild(card);
+
+  const chart=LC.createChart(chartDiv,{
+    layout:{background:{color:'transparent'},textColor:'#8b96a5',fontSize:10},
+    grid:{vertLines:{color:'#1e2630'},horzLines:{color:'#1e2630'}},
+    rightPriceScale:{borderColor:'#2a323d',scaleMargins:{top:.18,bottom:.18}},
+    timeScale:{borderColor:'#2a323d',timeVisible:true,secondsVisible:false,rightOffset:4},
+    crosshair:{mode:0},
+    handleScroll:true,handleScale:true,
+  });
+
+  const series=chart.addCandlestickSeries({
+    upColor:'#26a69a',downColor:'#ef5350',
+    borderUpColor:'#26a69a',borderDownColor:'#ef5350',
+    wickUpColor:'#26a69a',wickDownColor:'#ef5350',
+  });
+  series.setData(CANDLES);
+
+  series.createPriceLine({price:LEVEL,color:'#ff9f43',lineWidth:2,
+    lineStyle:2,axisLabelVisible:true,title:'H1'});
+  series.createPriceLine({price:cell.slPrice,color:'#ef5350',lineWidth:1,
+    lineStyle:0,axisLabelVisible:true,title:`SL ${slPct}%`});
+
+  if(cell.trailPath.length){
+    const trailSeries=chart.addLineSeries({
+      color:'#26a69a',lineWidth:2,lineType:1,
+      priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+    trailSeries.setData(cell.trailPath);
+  }
+
+  const markers=[];
+  markers.push({time:CANDLES[32].time,position:'belowBar',
+    color:'#ff9f43',shape:'circle',text:'① touch'});
+  cell.confirmIdx.forEach((idx,k)=>{
+    markers.push({time:CANDLES[idx].time,position:'aboveBar',
+      color:'#2962ff',shape:'square',text:`② C${k+1}`});
+  });
+  markers.push({time:CANDLES[cell.entryIdx].time,position:'belowBar',
+    color:'#d7dee8',shape:'arrowUp',text:`③ ${cell.entryPrice.toFixed(2)}`});
+  if(cell.trailPath.length){
+    markers.push({time:cell.trailPath[0].time,position:'aboveBar',
+      color:'#26a69a',shape:'circle',text:'④ trail on'});
+  }
+  const exitColor=cell.outcome==='TAKE'?'#26a69a'
+                 :cell.outcome==='STOP'?'#ef5350'
+                 :cell.outcome==='EXPIRED'?'#f7c948':'#6b7280';
+  markers.push({time:CANDLES[cell.exitIdx].time,position:'aboveBar',
+    color:exitColor,shape:cell.outcome==='TAKE'?'arrowDown':'square',
+    text:`${cell.outcome} ${cell.exitPrice.toFixed(2)}`});
+  series.setMarkers(markers);
+
+  chart.timeScale().fitContent();
+
+  function drawConfirmBoxes(){
+    svg.innerHTML='';
+    for(const idx of cell.confirmIdx){
+      const c=CANDLES[idx];
+      const x=chart.timeScale().timeToCoordinate(c.time);
+      const yH=series.priceToCoordinate(c.high);
+      const yL=series.priceToCoordinate(c.low);
+      if(x==null||yH==null||yL==null)continue;
+      const w=12;
+      const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');
+      rect.setAttribute('x',x-w/2);
+      rect.setAttribute('y',yH-2);
+      rect.setAttribute('width',w);
+      rect.setAttribute('height',(yL-yH)+4);
+      rect.setAttribute('fill','rgba(41,98,255,0.14)');
+      rect.setAttribute('stroke','#2962ff');
+      rect.setAttribute('stroke-dasharray','3 2');
+      rect.setAttribute('rx','2');
+      svg.appendChild(rect);
+    }
+  }
+  requestAnimationFrame(drawConfirmBoxes);
+  chart.timeScale().subscribeVisibleLogicalRangeChange(drawConfirmBoxes);
+
+  const hasConfirm=cell.entryType===1?null:cell.confirmIdx.length>0;
+  const step4Cls=cell.outcome==='TAKE'?'done-take'
+                :cell.outcome==='STOP'?'done-stop'
+                :cell.outcome==='NO_ENTRY'?'done-noentry':'on';
+  const step4Label=cell.outcome==='TAKE'?'trail'
+                  :cell.outcome==='STOP'?'SL':'—';
+  steps.innerHTML=`
+    <div class="step on"><div class="dot">1</div>touch</div>
+    <div class="step-line"></div>
+    <div class="step ${hasConfirm===null?'na':(hasConfirm?'on':'na')}">
+      <div class="dot">2</div>${hasConfirm===null?'N/A':'confirm'}</div>
+    <div class="step-line"></div>
+    <div class="step on"><div class="dot">3</div>entry</div>
+    <div class="step-line"></div>
+    <div class="step ${step4Cls}"><div class="dot">4</div>${step4Label}</div>`;
+
+  const rr=(cell.exitPrice-cell.entryPrice)/Math.abs(cell.entryPrice-cell.slPrice);
+  const dur=(cell.exitIdx-cell.entryIdx)*5;
+  const maxPct=((TRAIL_PEAK-cell.entryPrice)/cell.entryPrice*100).toFixed(2);
+  metrics.innerHTML=`
+    <span>Δt <b>${dur}м</b></span>
+    <span>R <b>${rr>=0?'+':''}${rr.toFixed(2)}</b></span>
+    <span>max+ <b>+${maxPct}%</b></span>
+    <span>MAE <b>-0.60%</b></span>
+    <span>MFE <b>+${maxPct}%</b></span>`;
+
+  return {chart,series};
+}
+
+const matrix=document.getElementById('matrix');
+matrix.appendChild(document.createElement('div'));
+for(const sIdx of[1,2,3]){
+  const el=document.createElement('div');el.className='col-head';
+  el.textContent=`SL${sIdx} · ${SL_SIZES[sIdx]}%`;
+  matrix.appendChild(el);
+}
+const entryLabels={1:'T1 · вход по касанию',
+                   2:'T2 · после 1-й закрытой M5',
+                   3:'T3 · после 2-х закрытых M5'};
+for(const eType of[1,2,3]){
+  const rh=document.createElement('div');rh.className='row-head';
+  rh.textContent=entryLabels[eType];matrix.appendChild(rh);
+  for(const sIdx of[1,2,3]){
+    const cell=buildCell(eType,sIdx);
+    const {chart,series}=renderCard(matrix,cell);
+    charts.push({chart,series});
+  }
+}
+
+let syncing=false;
+document.getElementById('sync').addEventListener('change',e=>{
+  const on=e.target.checked;
+  charts.forEach(({chart})=>{
+    chart.applyOptions({crosshair:on?{mode:0}:{mode:2}});
+  });
+});
+
+window.addEventListener('resize',()=>{
+  charts.forEach(({chart})=>chart.timeScale().fitContent());
+});
+</script>
+</body>
+</html>

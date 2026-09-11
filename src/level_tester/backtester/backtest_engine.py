@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Optional
 
 from level_tester.backtester.candle_loader import CandleLoader
+from level_tester.backtester.db_variant import DB_VARIANT_ID, resolve_db_variant
 from level_tester.backtester.entry_types import EntryResult, EntryType, resolve_entry
 from level_tester.backtester.signal_reader import SignalEntry
 from level_tester.backtester.trade_model import BacktestTrade
@@ -80,20 +81,26 @@ class BacktestEngine:
                 ))
             return results
 
-        # Resolve entry (same for all variants)
-        entry = resolve_entry(
-            entry_type=entry_type,
-            side=signal.side,
-            signal_entry_price=signal.entry_price,
-            signal_time=signal_time,
-            candles=candles,
-            limit_offset_pct=limit_offset_pct,
-            confirmation_bars=confirmation_bars,
-            confirmation_max_wait=confirmation_max_wait,
-        )
+        # Split DB baseline (frozen entry, per-signal params) from regular variants
+        db_variants = [v for v in variants if v.id == DB_VARIANT_ID]
+        regular_variants = [v for v in variants if v.id != DB_VARIANT_ID]
 
-        if entry is None:
-            for variant in variants:
+        # Resolve entry (same for all regular variants)
+        entry = None
+        if regular_variants:
+            entry = resolve_entry(
+                entry_type=entry_type,
+                side=signal.side,
+                signal_entry_price=signal.entry_price,
+                signal_time=signal_time,
+                candles=candles,
+                limit_offset_pct=limit_offset_pct,
+                confirmation_bars=confirmation_bars,
+                confirmation_max_wait=confirmation_max_wait,
+            )
+
+        if entry is None and regular_variants:
+            for variant in regular_variants:
                 no_entry_trade = BacktestTrade(
                     id=f"{signal.signal_id}_{variant.id}",
                     side=signal.side,
@@ -110,23 +117,62 @@ class BacktestEngine:
                     signal=signal, variant=variant, entry_type=entry_type,
                     entry=None, trade=no_entry_trade, candles_used=len(candles),
                 ))
-            return results
+        elif entry is not None:
+            # Find the index of entry candle
+            entry_candle_index = 0
+            for i, candle in enumerate(candles):
+                if candle.open_time >= entry.entry_time:
+                    entry_candle_index = i
+                    break
 
-        # Find the index of entry candle
-        entry_candle_index = 0
-        for i, candle in enumerate(candles):
-            if candle.open_time >= entry.entry_time:
-                entry_candle_index = i
-                break
+            # Run each regular variant from entry point
+            for variant in regular_variants:
+                trade = self._run_variant(
+                    signal, variant, entry, candles, entry_candle_index, signal_time
+                )
+                results.append(TradeResult(
+                    signal=signal, variant=variant, entry_type=entry_type,
+                    entry=entry, trade=trade, candles_used=len(candles),
+                ))
 
-        # Run each variant from entry point
-        for variant in variants:
-            trade = self._run_variant(
-                signal, variant, entry, candles, entry_candle_index, signal_time
+        # DB baseline: frozen entry_price from DB, per-signal resolved params
+        for variant in db_variants:
+            if not signal.entry_price:
+                no_entry_trade = BacktestTrade(
+                    id=f"{signal.signal_id}_{variant.id}",
+                    side=signal.side,
+                    entry_time=signal_time,
+                    entry_price=Decimal(str(signal.entry_price or 0)),
+                    stop_price=Decimal(str(signal.entry_price or 0)),
+                    take_price=Decimal(str(signal.entry_price or 0)),
+                    status="closed",
+                    exit_reason="no_entry",
+                    pnl=Decimal(0),
+                    pnl_pct=Decimal(0),
+                )
+                results.append(TradeResult(
+                    signal=signal, variant=variant, entry_type=entry_type,
+                    entry=None, trade=no_entry_trade, candles_used=len(candles),
+                ))
+                continue
+            resolved = resolve_db_variant(signal)
+            db_entry = EntryResult(
+                entry_time=signal_time,
+                entry_price=Decimal(str(resolved.entry_price)),
+                bars_waited=0,
             )
+            entry_candle_index = 0
+            for i, candle in enumerate(candles):
+                if candle.open_time >= signal_time:
+                    entry_candle_index = i
+                    break
+            trade = self._run_variant(
+                signal, resolved.variant, db_entry, candles, entry_candle_index, signal_time
+            )
+            trade.id = f"{signal.signal_id}_{variant.id}"
             results.append(TradeResult(
                 signal=signal, variant=variant, entry_type=entry_type,
-                entry=entry, trade=trade, candles_used=len(candles),
+                entry=db_entry, trade=trade, candles_used=len(candles),
             ))
 
         return results
