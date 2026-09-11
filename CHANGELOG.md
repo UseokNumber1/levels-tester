@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.0 (2026-09-11)
+
+### Added
+- **STOP TAKE filter — worked situations** (closed by stop or take, any side): HourBounce outcome dropdown (`web/hourbounce.html`, `web/hourbounce.js`), Report side dropdown (`web/report.html`), Backtest "All Trades" result filter (`web/backtest.html`, `web/backtest.js` — matches `stop_loss`/`take_profit`/`trailing_stop`)
+- **TP/SL in percent in HourBounce signal list** (`web/hourbounce.js`): TP/SL shown as price + signed % vs level, side-aware (SHORT mirrored); archive TP JSON-array (`'[0.3683]'`) parsed to first price
+- **Matrix 3×3 best-cell highlight** (`web/hourbounce.html`, `web/hourbounce.js`): max PnL among closed (TAKE/STOP) cells — green frame for the most profitable, red frame for the smallest loss when all 9 cells closed by stop
+- **HourBounce nav link** on the main page (`web/index.html`)
+
+### Changed
+- **Price scale fit** (`web/hourbounce.js`, export template in `src/level_tester/api/app.py`): `calcCenterRange` (level-centered ±15%) replaced with `calcFitRange` — dataset min at the bottom edge, max at the top edge (candles + SL/entry/exit/trail lines); applied to single chart, all 9 matrix cells and exported HTML
+- **Chart window +70%** (`web/hourbounce.js`, `src/level_tester/api/app.py`): review/matrix request `pre=51&post=51` (was 30/30); placement fallback (no touch) `sig_idx+96` → `+163`
+- **Report footer in cents** (`src/level_tester/api/app.py`, `web/report.html`): footer and group subtotals rounded to 2 decimals to match displayed cells; TOTAL under "Лучший" is now the sum of per-row best PnL (was the sum of all 9 cells); rows carry `best_pnl`
+- **Report group subtotal alignment** (`web/report.html`): subtotal rows account for the "Arch факт" column
+- **Removed Vol/NATR placeholders** from HourBounce signal cards (`web/hourbounce.js`): neither is stored in `signal_archive` (columns or metadata) nor in `trading.db`
+- **Script cache-busters**: `hourbounce.js?v=5`, `backtest.js?v=2`
+- **Version sync**: `VERSION` 1.1.0 → 1.2.0, `pyproject.toml` 1.0.2 → 1.2.0
+
 ## v1.1.0 (2026-09-11)
 
 ### Added

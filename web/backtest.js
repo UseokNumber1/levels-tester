@@ -1126,6 +1126,7 @@
     if (side) filtered = filtered.filter(t => t.side === side);
     if (result === 'win') filtered = filtered.filter(t => t.pnl_pct > 0);
     if (result === 'loss') filtered = filtered.filter(t => t.pnl_pct < 0);
+    if (result === 'stop_take') filtered = filtered.filter(t => ['stop_loss', 'take_profit', 'trailing_stop'].includes(t.exit_reason));
     if (result === 'no_entry') filtered = filtered.filter(t => t.exit_reason === 'no_entry');
     if (varId) filtered = filtered.filter(t => t.variant_id === varId);
     if (method !== '') filtered = filtered.filter(t => String(t.confirmation_method) === method);

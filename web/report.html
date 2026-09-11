@@ -47,7 +47,7 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <main>
 <div class="filters">
 <input id="f-search" placeholder="Поиск BTC, id..." style="min-width:180px">
-<select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option></select>
+<select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option><option value="STOP_TAKE">STOP TAKE</option></select>
 <label style="font-size:11px;color:var(--dim)">с даты<br><input id="f-from" type="date" style="margin-top:2px"></label>
 <label style="font-size:11px;color:var(--dim)">по дату<br><input id="f-to" type="date" style="margin-top:2px"></label>
 <select id="f-limit"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select>
@@ -111,11 +111,14 @@ $('btn-run').onclick = async () => {
   $('btn-csv').disabled = true;
   $('wrap').style.display = 'none';
   try {
-    const q = new URLSearchParams({ search: $('f-search').value.trim(), side: $('f-side').value, limit: $('f-limit').value });
+    const sideVal = $('f-side').value;
+    const stopTake = sideVal === 'STOP_TAKE';
+    const q = new URLSearchParams({ search: $('f-search').value.trim(), side: stopTake ? '' : sideVal, limit: $('f-limit').value });
     if ($('f-from').value) q.set('date_from', $('f-from').value);
     if ($('f-to').value) q.set('date_to', $('f-to').value);
     const s = await api('/api/hourbounce/signals?' + q.toString());
     let items = s.items || [];
+    if (stopTake) items = items.filter((x) => ['STOP', 'TAKE'].includes(String(x.outcome_arch || '').toUpperCase()));
     if ($('f-traded').checked) items = items.filter((x) => x.status && String(x.status).startsWith('closed_'));
     const id2arch = {};
     items.forEach((x) => { id2arch[x.signal_id] = x; });
@@ -180,14 +183,15 @@ function fmtV(v) {
 }
 
 function subtotalRow(label, sums, cols, ncols) {
-  let h = `<tr class="grp"><td>${label}</td>`;
+  // колонки как в шапке/футере: Сигнал | Arch факт(пусто) | cols... | Лучший(TOTAL)
+  let h = `<tr class="grp"><td>${label}</td><td></td>`;
   for (const c of cols) {
     const f = fmtV(sums[c]);
     h += `<td class="${f.cls}">${f.txt}</td>`;
   }
   const t = fmtV(sums.TOTAL);
   h += `<td class="${t.cls}">${t.txt}</td>`;
-  const n = ncols - cols.length - 2;
+  const n = ncols - cols.length - 3;
   for (let i = 0; i < n; i++) h += '<td></td>';
   return h + '</tr>';
 }
@@ -211,10 +215,23 @@ function renderTable(data, groupMode) {
       const sums = {};
       cols.forEach((c) => { sums[c] = 0; });
       sums.TOTAL = 0;
+      // Суммируем отображаемые значения (копейки, 2 знака) — иначе итог
+      // не сойдётся с суммой клеток, которые показаны через toFixed(2).
+      let totBest = 0;
       groups[k].forEach((r) => {
-        cols.forEach((c) => { sums[c] = Math.round((sums[c] + (Number(((r.cells || {})[c] || {}).pnl) || 0)) * 10000) / 10000; });
+        let b = -Infinity, hit = false;
+        cols.forEach((c) => {
+          const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
+          const d = Math.round(v * 100) / 100;
+          sums[c] = Math.round((sums[c] + d) * 100) / 100;
+          if (v > b) b = v;
+          if (v) hit = true;
+        });
+        const bd = hit ? Math.round(b * 100) / 100 : 0;
+        totBest = Math.round((totBest + bd) * 100) / 100;
       });
-      sums.TOTAL = Math.round(cols.reduce((a, c) => a + sums[c], 0) * 10000) / 10000;
+      // TOTAL стоит под колонкой "Лучший" -> сумма лучших вниз по столбцу
+      sums.TOTAL = totBest;
       const n = groups[k].length;
       const nTr = groups[k].filter((r) => r.traded).length;
       h += subtotalRow(`▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''}`, sums, cols, ncols);

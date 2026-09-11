@@ -1588,7 +1588,7 @@ async def hourbounce_review(
         # касания нет: показываем окрестность выставления, а не 1000 баров пустоты
         sig_idx = data["sig_idx"]
         lo = max(0, sig_idx - pre)
-        hi = min(len(candles), sig_idx + 96)
+        hi = min(len(candles), sig_idx + 163)  # 96 + 70%: столько же контекста, как в обычном окне
         cell = dict(cell)
         cell["lo"], cell["hi"] = lo, hi
         mode = "placement"
@@ -1720,7 +1720,7 @@ for(const cell of D.cells){
  const el=document.getElementById('ch-'+cell.entry+'-'+cell.sl_index);
  const ch=LC.createChart(el,{layout:{background:{color:'transparent'},textColor:'#8b96a5'},grid:{vertLines:{color:'#1e2630'},horzLines:{color:'#1e2630'}},timeScale:{timeVisible:true,tickMarkFormatter:(t,type)=>{const d=new Date(t*1000),p=n=>String(n).padStart(2,'0'),hm=p(d.getUTCHours())+':'+p(d.getUTCMinutes())+' UTC';return type==='time'?hm:p(d.getUTCDate())+'.'+p(d.getUTCMonth()+1)+' '+hm;}}});
  const sl=C.slice(cell.lo,cell.hi);
- const lv=Number(D.signal.level_price);let mn=1/0,mx=-1/0;sl.forEach(c=>{mn=Math.min(mn,c.low);mx=Math.max(mx,c.high);});[cell.sl_price,cell.entry_price,cell.exit_price].concat((cell.trail_path||[]).map(p=>p.value)).forEach(v=>{if(v===null||v===undefined||v==='')return;v=Number(v);if(isFinite(v)){mn=Math.min(mn,v);mx=Math.max(mx,v);}});let RG=null;if(isFinite(lv)&&isFinite(mn)&&isFinite(mx)&&mn<mx){const half=Math.max(Math.abs(mx-lv),Math.abs(lv-mn),Math.abs(lv)*0.0005||0.000001)*1.15;RG={minValue:lv-half,maxValue:lv+half};}
+  const lv=Number(D.signal.level_price);let mn=1/0,mx=-1/0;sl.forEach(c=>{mn=Math.min(mn,c.low);mx=Math.max(mx,c.high);});[cell.sl_price,cell.entry_price,cell.exit_price].concat((cell.trail_path||[]).map(p=>p.value)).forEach(v=>{if(v===null||v===undefined||v==='')return;v=Number(v);if(isFinite(v)){mn=Math.min(mn,v);mx=Math.max(mx,v);}});let RG=null;if(isFinite(mn)&&isFinite(mx)){if(mn>=mx){const e=Math.abs(mx)*0.0005||0.000001;mn-=e;mx+=e;}RG={minValue:mn,maxValue:mx};}
  const s=ch.addSeries(LC.CandlestickSeries,{upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',priceFormat:PF,autoscaleInfoProvider:(base)=>(RG?{priceRange:RG}:base())});
  s.setData(sl);
  s.createPriceLine({price:Number(D.signal.level_price),color:'#ff9f43',lineWidth:2,lineStyle:2,title:'H1'});
@@ -1849,6 +1849,7 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
     job = _hb_report_jobs[job_id]
     rows: list[dict[str, Any]] = []
     footer = {c: 0.0 for c in HB_REPORT_COLS}
+    footer_best = 0.0
     try:
         job["status"] = "running"
         arch = _hb_archive_trades(signal_ids)
@@ -1867,12 +1868,19 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
                     pnl = _hb_cell_pnl(cell or {}, sig["side"]) if cell else 0.0
                     outcome = (cell or {}).get("outcome")
                     cells[col] = {"pnl": pnl, "outcome": outcome}
-                    footer[col] = round(footer[col] + pnl, 4)
+                    # Футер — в копейках (2 знака): таблица показывает toFixed(2),
+                    # итог обязан сходиться с суммой отображаемых клеток.
+                    d = round(pnl, 2)
+                    footer[col] = round(footer[col] + d, 2)
                     row_total = round(row_total + pnl, 4)
+                best = max((cells[c]["pnl"] for c in HB_REPORT_COLS), default=0.0)
+                any_hit = any(cells[c]["pnl"] for c in HB_REPORT_COLS)
+                footer_best = round(footer_best + (round(best, 2) if any_hit else 0.0), 2)
                 rows.append({
                     "signal_id": sid, "symbol": sig["symbol"], "side": sig["side"],
                     "level_price": sig["level_price"], "dt_place": sig["dt_place"],
                     "outcome_arch": None, "cells": cells, "row_total": row_total,
+                    "best_pnl": best,
                     "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
                     "traded": bool(info.get("traded")),
                 })
@@ -1885,7 +1893,9 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
                              "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
                              "traded": bool(info.get("traded"))})
             job["done"] = i + 1
-        footer["TOTAL"] = round(sum(footer.values()), 4)
+        # TOTAL стоит под колонкой "Лучший" -> сумма лучших PnL вниз по столбцу,
+        # а не сумма всех 9 клеток строки.
+        footer["TOTAL"] = footer_best
         job["result"] = {"columns": HB_REPORT_COLS, "rows": rows, "footer": footer,
                          "count": len(rows)}
         job["status"] = "completed"

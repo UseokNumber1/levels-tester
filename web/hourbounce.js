@@ -20,6 +20,36 @@ function badge(out) {
   return `<span class="badge ${m[out] || 'b-noentry'}">${out || '—'}</span>`;
 }
 
+// TP в архиве — JSON-массив строкой ('[0.3683]'), берём первую цену.
+function firstPrice(v) {
+  if (v === null || v === undefined || v === '') return null;
+  let n;
+  try {
+    const p = typeof v === 'string' ? JSON.parse(v) : v;
+    n = Number(Array.isArray(p) ? p[0] : p);
+  } catch (_) { n = Number(v); }
+  return Number.isFinite(n) ? n : null;
+}
+// PnL-знак относительно уровня: LONG (px-lvl), SHORT (lvl-px), в % от уровня.
+function pctSigned(px, lvl, side) {
+  if (px === null || !Number.isFinite(lvl) || lvl === 0) return null;
+  const m = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  return (m * (px - lvl) / Math.abs(lvl)) * 100;
+}
+function fmtPct(p) {
+  if (p === null || !Number.isFinite(p)) return '';
+  return ` (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)`;
+}
+function tpSlLine(s) {
+  const lvl = Number(s.level_price);
+  const tp = firstPrice(s.tp_arch);
+  const slRaw = (s.sl_arch === null || s.sl_arch === undefined || s.sl_arch === '') ? null : Number(s.sl_arch);
+  const sl = Number.isFinite(slRaw) ? slRaw : null;
+  const tpTxt = tp !== null ? `${tp}${fmtPct(pctSigned(tp, lvl, s.side))}` : '—';
+  const slTxt = sl !== null ? `${s.sl_arch}${fmtPct(pctSigned(sl, lvl, s.side))}` : '—';
+  return `TP ${tpTxt} · SL ${slTxt}`;
+}
+
 // Биржевая точность цены символа (приходит в signal.price_precision/tick_size).
 function precOf(signal) {
   const p = Number(signal && signal.price_precision);
@@ -40,13 +70,9 @@ function shortDt(iso) {
   if (!iso) return '—';
   return String(iso).replace('T', ' ').replace(/\+00:00|Z$/, ' UTC').slice(0, 22);
 }
-// Центрирование цены: уровень ровно посередине шкалы при открытии.
-// Считаем симметричный относительно уровня диапазон; сама установка —
-// через autoscaleInfoProvider СВЕЖЕЙ серии (переиспользованная серия тащит
-// старый масштаб при смене инструмента — поэтому серию пересоздаём).
-function calcCenterRange(level, candles, extraPrices) {
-  const lv = Number(level);
-  if (!Number.isFinite(lv) || !candles.length) return null;
+// Масштаб цены строго по факту: минимум набора — на нижней границе,
+// максимум — на верхней (без центрирования по уровню и без отступов).
+function calcFitRange(candles, extraPrices) {
   let mn = Infinity, mx = -Infinity;
   candles.forEach((c) => { mn = Math.min(mn, c.low); mx = Math.max(mx, c.high); });
   (extraPrices || []).forEach((v) => {
@@ -54,9 +80,9 @@ function calcCenterRange(level, candles, extraPrices) {
     const n = Number(v);
     if (Number.isFinite(n)) { mn = Math.min(mn, n); mx = Math.max(mx, n); }
   });
-  if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn >= mx) return null;
-  const half = Math.max(Math.abs(mx - lv), Math.abs(lv - mn), Math.abs(lv) * 0.0005 || 0.000001) * 1.15;
-  return { minValue: lv - half, maxValue: lv + half };
+  if (!Number.isFinite(mn) || !Number.isFinite(mx)) return null;
+  if (mn >= mx) { const e = Math.abs(mx) * 0.0005 || 0.000001; mn -= e; mx += e; }
+  return { minValue: mn, maxValue: mx };
 }
 // Ось времени строго в UTC: LWC по умолчанию рисует подписи в поясе браузера.
 function utcTick(t, type) {
@@ -68,6 +94,9 @@ function utcTick(t, type) {
 }
 
 async function loadSignals() {
+  const stopTake = $('f-outcome').value === 'STOP_TAKE';
+  // STOP TAKE — отработавшие (закрытые по стопу или тейку, любая сторона):
+  // сторону уважаем как выбрал пользователь, исход дофильтровываем на клиенте.
   const q = new URLSearchParams({
     search: $('f-search').value.trim(),
     side: $('f-side').value,
@@ -79,7 +108,8 @@ async function loadSignals() {
   const d = await api('/api/hourbounce/signals?' + q.toString());
   let items = d.items || [];
   const fo = $('f-outcome').value;
-  if (fo) items = items.filter((s) => s.outcome_arch === fo);
+  if (stopTake) items = items.filter((s) => ['STOP', 'TAKE'].includes(String(s.outcome_arch || '').toUpperCase()));
+  else if (fo) items = items.filter((s) => s.outcome_arch === fo);
   state.signals = items;
   $('sig-count').textContent = `сигналов: ${items.length} (показаны первые 200)`;
   const box = $('siglist');
@@ -88,7 +118,7 @@ async function loadSignals() {
     const div = document.createElement('div');
     div.className = 'sigrow' + (state.sel && state.sel.signal_id === s.signal_id ? ' sel' : '');
     div.innerHTML = `<div><div class="nm">${s.symbol} · ${s.side} · ${s.signal_id}</div>
-      <div class="mt">lvl ${s.level_price} · выставлен ${s.dt_place || ''} UTC<br>Vol — · NATR — · TP ${s.tp_arch || '—'} · SL ${s.sl_arch || '—'}<br>touch PGv2 ${s.touch_ref ? s.touch_ref.replace('T', ' ').replace('Z', ' UTC') : '—'}</div></div>
+      <div class="mt">lvl ${s.level_price} · выставлен ${s.dt_place || ''} UTC<br>${tpSlLine(s)}<br>touch PGv2 ${s.touch_ref ? s.touch_ref.replace('T', ' ').replace('Z', ' UTC') : '—'}</div></div>
       <div>${badge(s.outcome_arch)}</div>`;
     div.onclick = () => selectSignal(i);
     box.appendChild(div);
@@ -178,7 +208,7 @@ async function loadReview() {
   state.forceRefresh = false;
   let d;
   try {
-    d = await api(`/api/hourbounce/review?signal_id=${encodeURIComponent(s.signal_id)}&entry=${state.entry}&sl=${state.sl}&mode=${state.execMode}${rf}`);
+    d = await api(`/api/hourbounce/review?signal_id=${encodeURIComponent(s.signal_id)}&entry=${state.entry}&sl=${state.sl}&mode=${state.execMode}&pre=51&post=51${rf}`);
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
@@ -189,7 +219,7 @@ async function loadReview() {
 function renderReview(d) {
   ensureChart();
   const { signal, params, result, candles } = d;
-  state.centerRange = calcCenterRange(signal.level_price, candles,
+  state.centerRange = calcFitRange(candles,
     [result.sl_price, result.be_price, result.entry_price, result.exit_price]
       .concat((result.trail_path || []).map((p) => p.value)));
   resetMainSeries(signal);
@@ -343,7 +373,7 @@ async function loadMatrix() {
   state.forceRefresh = false;
   let d;
   try {
-    d = await api(`/api/hourbounce/matrix?signal_id=${encodeURIComponent(s.signal_id)}${rf}`);
+    d = await api(`/api/hourbounce/matrix?signal_id=${encodeURIComponent(s.signal_id)}&pre=51&post=51${rf}`);
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
@@ -352,6 +382,25 @@ async function loadMatrix() {
   const box = $('matrix');
   const counts = { TAKE: 0, STOP: 0, NO_ENTRY: 0, EXPIRED: 0 };
   d.cells.forEach((c) => { counts[c.outcome] = (counts[c.outcome] || 0) + 1; });
+  // Самый выгодный вариант: max PnL среди закрытых (TAKE/STOP).
+  // Зелёная рамка — лучший; красная — наименьший убыток, если все 9 закрылись по стопу.
+  const mSide = String((d.signal && d.signal.side) || (s.side) || '').toUpperCase();
+  const pnlOf = (c) => {
+    const e = Number(c.entry_price), x = Number(c.exit_price);
+    if (!Number.isFinite(e) || !Number.isFinite(x) || e === 0) return null;
+    let r = ((x - e) / e) * 100;
+    if (mSide === 'SHORT') r = -r;
+    return r;
+  };
+  const closed = d.cells
+    .map((c) => ({ c, pnl: pnlOf(c) }))
+    .filter((o) => o.pnl !== null && (o.c.outcome === 'TAKE' || o.c.outcome === 'STOP'));
+  let bestKey = null, bestRed = false;
+  if (closed.length) {
+    closed.sort((a, b) => b.pnl - a.pnl);
+    bestKey = closed[0].c.entry + '|' + closed[0].c.sl_index;
+    bestRed = d.cells.every((c) => c.outcome === 'STOP');
+  }
   $('agg').innerHTML = `<span>winrate <b>${Math.round((counts.TAKE / 9) * 100)}%</b></span>
     <span>TAKE <b>${counts.TAKE}</b></span><span>STOP <b>${counts.STOP}</b></span>
     <span>NO_ENTRY <b>${counts.NO_ENTRY}</b></span><span>EXPIRED <b>${counts.EXPIRED}</b></span>
@@ -379,7 +428,8 @@ async function loadMatrix() {
     [1, 2, 3].forEach((sl) => {
       const cell = d.cells.find((c) => c.entry === code && c.sl_index === sl);
       const card = document.createElement('div');
-      card.className = 'mcard';
+      const hl = (code + '|' + sl) === bestKey ? (bestRed ? ' best-stop' : ' best-take') : '';
+      card.className = 'mcard' + hl;
       const cls = { TAKE: 'b-take', STOP: 'b-stop', NO_ENTRY: 'b-noentry', EXPIRED: 'b-expired' }[cell.outcome];
       card.innerHTML = `<div class="mhead"><span>T${code[1]}·SL${sl} · M5</span><span class="badge ${cls}">${cell.outcome}</span></div><div class="mchart"></div><div class="mfoot">in ${cell.entry_price || '—'} · out ${cell.exit_price || '—'} · R ${cell.r_multiple || '—'}</div>`;
       box.appendChild(card);
@@ -392,7 +442,7 @@ async function loadMatrix() {
         timeScale: { borderColor: '#2a323d', timeVisible: true, rightOffset: 3, tickMarkFormatter: utcTick },
       });
       const slice = d.candles.slice(cell.lo, cell.hi);
-      const range = calcCenterRange(d.signal.level_price, slice,
+      const range = calcFitRange(slice,
         [cell.sl_price, cell.entry_price, cell.exit_price]
           .concat(((cell.trail_path || []).filter((p) => p.time)).map((p) => p.value)));
       const series = chart.addSeries(LightweightCharts.CandlestickSeries, {

@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@qwen-code/sdk": "^0.1.6",
+    "lightweight-charts": "^5.1.0",
+    "lightweight-charts-drawing": "^0.1.1"
+  }
+}

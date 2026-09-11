@@ -32,6 +32,8 @@ main{padding:12px 14px;overflow-y:auto;min-width:0}
 .colh{text-align:center;color:var(--dim);font-size:11px;font-weight:700;letter-spacing:.06em;padding:4px 0}
 .rowh{writing-mode:vertical-rl;transform:rotate(180deg);display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px;font-weight:700;border-right:1px dashed var(--border);position:sticky;left:0;background:var(--bg);z-index:2}
 .mcard{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.mcard.best-take{outline:2px solid #26a69a;box-shadow:0 0 0 1px #26a69a}
+.mcard.best-stop{outline:2px solid #ef5350;box-shadow:0 0 0 1px #ef5350}
 .mhead{display:flex;justify-content:space-between;padding:6px 9px;background:var(--panel2);font-size:11px;font-family:ui-monospace,monospace;color:var(--dim)}
 .mchart{height:200px;position:relative}
 .mfoot{padding:5px 9px;font-size:10.5px;color:var(--dim);font-family:ui-monospace,monospace;border-top:1px solid var(--border)}
@@ -65,7 +67,7 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <div class="filters">
 <input id="f-search" placeholder="Поиск BTC, id..." style="flex:1;min-width:140px">
 <select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option></select>
-<select id="f-outcome"><option value="">Все исходы арх.</option><option>TAKE</option><option>STOP</option><option>NO_ENTRY</option><option>EXPIRED</option></select>
+<select id="f-outcome"><option value="">Все исходы арх.</option><option>TAKE</option><option>STOP</option><option value="STOP_TAKE">STOP TAKE</option><option>NO_ENTRY</option><option>EXPIRED</option></select>
 <input id="f-from" type="date" title="с даты выставления (UTC)" style="width:130px">
 <input id="f-to" type="date" title="по дату выставления (UTC)" style="width:130px">
 <select id="f-sort" title="Сортировка списка">
@@ -111,6 +113,6 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <div class="legend"><span><i class="sw" style="background:#ff9f43"></i>H1 уровень</span><span><i class="sw" style="background:#ef5350"></i>SL</span><span><i class="sw" style="background:#26a69a"></i>trail</span><span><i class="sw" style="background:#2962ff"></i>confirm</span><span>① касание · ② C1/C2 подтверждение (только подряд) · ③ вход · ④ трейлинг · время UTC</span></div>
 </main>
 </div>
-<script src="/static/hourbounce.js"></script>
+<script src="/static/hourbounce.js?v=5"></script>
 </body>
 </html>
