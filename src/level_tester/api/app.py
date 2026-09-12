@@ -9,10 +9,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Thread
-
-_APP_DIR = Path(__file__).resolve().parents[3]
-_VERSION_FILE = _APP_DIR / "VERSION"
-APP_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -26,7 +22,7 @@ from level_tester.application.instruments import InstrumentService
 from level_tester.application.run_service import RunService
 from level_tester.backtester.backtest_engine import BacktestEngine
 from level_tester.backtester.entry_types import EntryType
-from level_tester.backtester.metrics import compute_all_metrics, compute_all_metrics_by_key
+from level_tester.backtester.metrics import compute_all_metrics_by_key
 from level_tester.backtester.signal_reader import SignalReader
 from level_tester.backtester.variants import BUILTIN_VARIANTS, get_builtin
 from level_tester.domain.confirmation import SUPPORTED_CONFIRMATION_METHODS
@@ -42,6 +38,10 @@ from level_tester.infrastructure.database import (
 from level_tester.infrastructure.instruments import InstrumentRepository
 from level_tester.infrastructure.repositories import CandleRepository, RunRepository
 from level_tester.settings import get_settings, load_replay_config
+
+_APP_DIR = Path(__file__).resolve().parents[3]
+_VERSION_FILE = _APP_DIR / "VERSION"
+APP_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +462,6 @@ class BacktestRunRequest(BaseModel):
                 raise ValueError("custom_variants: id '__DB__' is reserved for the DB baseline")
 
         n_signals = len(self.signal_ids)
-        n_variants = len(self.variants)
         n_methods = len(self.confirmation_methods) or 1
         n_api_calls = n_signals * n_methods  # свечи грузятся 1 раз на сигнал×метод
         est_seconds = n_api_calls * 1.5  # ~1.5 сек на API-запрос
@@ -738,7 +737,6 @@ def _run_backtest(job_id: str, request: BacktestRunRequest) -> None:
 
         METHOD_LABELS = {0: "Touch", 1: "1 bar", 2: "2 bars"}
         methods = request.confirmation_methods or [2]
-        total_signals = len(all_signals) * len(methods)
 
         def progress(current, total, symbol):
             job["progress"] = current
@@ -1117,7 +1115,6 @@ def _hb_archive_meta(signal_id: str) -> dict[str, Any]:
                 # эталон PGv2: когда стартовал подсчёт баров после касания (UTC ISO)
                 "touch_ref": meta.get("confirmation_started_at"),
                 "required_bars": req,
-                "watch_start": meta.get("confirmation_waiting_started_at"),
                 # когда PGv2 реально начал смотреть уровень (рестарт бота сдвигает);
                 # сканируем от max(dt_place, watch_start), иначе находим касания,
                 # которых живой бот не видел
@@ -1283,14 +1280,7 @@ def _hb_price_spec(symbol: str, fallback_price: float | str) -> dict[str, Any]:
 
 
 def _hb_signal_json(s) -> dict[str, Any]:
-    import json as _json
-
-    meta: dict[str, Any] = {}
-    try:
-        # SignalReader не отдаёт metadata наружу — перечитаем её здесь для dt_place
-        pass
-    except Exception:
-        pass
+    # SignalReader не отдаёт metadata наружу — dt_place берём из s.timestamp
     ts = _hb_parse_time(s.timestamp)
     return {
         "signal_id": s.signal_id,
@@ -1327,7 +1317,6 @@ async def hourbounce_signals(
     reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
     period_start, period_end = (period.split(":") if ":" in period else (None, None))
     # архив хранит LONG/SHORT — так и показываем, без маппинга в BUY/SELL
-    side_norm = side.upper() or None
     signals = reader.read(
         symbol=symbol or None,
         side=None,  # фильтр ниже по точному совпадению LONG/SHORT/ALL

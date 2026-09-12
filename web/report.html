@@ -40,7 +40,7 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <body>
 <header>
 <h1>PnL-отчёт: сигналы × входы</h1>
-<span style="color:var(--dim);font-size:12px">клетка = PnL% со знаком стороны · 0 = нет входа · подвал = суммы по столбцам</span>
+<span style="color:var(--dim);font-size:12px">клетка = PnL% со знаком стороны · 0 = нет входа · под периодом две строки: Σ PnL и winrate (w/d) · подвал = суммы + winrate по столбцам</span>
 <span style="margin-left:auto"></span>
 <a href="/hourbounce" style="color:#8ec0ff;font-size:12px">→ Review</a>
 </header>
@@ -182,6 +182,13 @@ function fmtV(v) {
   return { txt: `${n > 0 ? '+' : ''}${n.toFixed(2)}`, cls };
 }
 
+function fmtWR(wins, decided) {
+  if (!decided) return { txt: '—', cls: 'zero' };
+  const r = (wins / decided) * 100;
+  const cls = r >= 50 ? 'pos' : 'neg';
+  return { txt: `${r.toFixed(1)}% (${wins}/${decided})`, cls };
+}
+
 function subtotalRow(label, sums, cols, ncols) {
   // колонки как в шапке/футере: Сигнал | Arch факт(пусто) | cols... | Лучший(TOTAL)
   let h = `<tr class="grp"><td>${label}</td><td></td>`;
@@ -190,6 +197,23 @@ function subtotalRow(label, sums, cols, ncols) {
     h += `<td class="${f.cls}">${f.txt}</td>`;
   }
   const t = fmtV(sums.TOTAL);
+  h += `<td class="${t.cls}">${t.txt}</td>`;
+  const n = ncols - cols.length - 3;
+  for (let i = 0; i < n; i++) h += '<td></td>';
+  return h + '</tr>';
+}
+
+function winrateRow(label, stats, cols, ncols) {
+  // Вторая строка под итогом периода: винрейт по каждому варианту T/SL.
+  // win = pnl > 0, loss = pnl < 0, флэт (0 = нет входа) из знаменателя исключён.
+  let h = `<tr class="grp" style="font-weight:400;"><td style="padding-left:18px;">${label}</td><td></td>`;
+  for (const c of cols) {
+    const st = stats[c] || { w: 0, d: 0 };
+    const f = fmtWR(st.w, st.d);
+    h += `<td class="${f.cls}">${f.txt}</td>`;
+  }
+  const tb = stats.TOTAL || { w: 0, d: 0 };
+  const t = fmtWR(tb.w, tb.d);
   h += `<td class="${t.cls}">${t.txt}</td>`;
   const n = ncols - cols.length - 3;
   for (let i = 0; i < n; i++) h += '<td></td>';
@@ -215,6 +239,9 @@ function renderTable(data, groupMode) {
       const sums = {};
       cols.forEach((c) => { sums[c] = 0; });
       sums.TOTAL = 0;
+      const stats = {};
+      cols.forEach((c) => { stats[c] = { w: 0, d: 0 }; });
+      stats.TOTAL = { w: 0, d: 0 };
       // Суммируем отображаемые значения (копейки, 2 знака) — иначе итог
       // не сойдётся с суммой клеток, которые показаны через toFixed(2).
       let totBest = 0;
@@ -224,17 +251,24 @@ function renderTable(data, groupMode) {
           const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
           const d = Math.round(v * 100) / 100;
           sums[c] = Math.round((sums[c] + d) * 100) / 100;
+          if (v > 0) stats[c].w += 1;
+          if (v !== 0) stats[c].d += 1;
           if (v > b) b = v;
           if (v) hit = true;
         });
         const bd = hit ? Math.round(b * 100) / 100 : 0;
         totBest = Math.round((totBest + bd) * 100) / 100;
+        if (hit) {
+          stats.TOTAL.d += 1;
+          if (b > 0) stats.TOTAL.w += 1;
+        }
       });
       // TOTAL стоит под колонкой "Лучший" -> сумма лучших вниз по столбцу
       sums.TOTAL = totBest;
       const n = groups[k].length;
       const nTr = groups[k].filter((r) => r.traded).length;
-      h += subtotalRow(`▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''}`, sums, cols, ncols);
+      h += subtotalRow(`▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''} · Σ PnL`, sums, cols, ncols);
+      h += winrateRow(`↳ ${k} — winrate по вариантам (win = PnL&gt;0, флэт исключён)`, stats, cols, ncols);
     }
     for (const r of data.rows.filter((x) => gkey(x) === k)) {
       const archTxt = r.traded
@@ -261,14 +295,40 @@ function renderTable(data, groupMode) {
       h += `<td class="${bc}" style="font-weight:700;" title="Лучший вариант входа/стопа на этом сигнале">${anyTrade ? `${bestCol} ${bestV > 0 ? '+' : ''}${bestV.toFixed(2)}` : '—'}</td></tr>`;
     }
   }
-  h += `</tbody><tfoot><tr><td>Σ столбец</td><td></td>`;
+  h += `</tbody><tfoot><tr><td>Σ столбец (PnL)</td><td></td>`;
   for (const c of cols) {
     const v = Number((data.footer || {})[c]) || 0;
     const cls = v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero';
     h += `<td class="${cls}">${v > 0 ? '+' : ''}${v.toFixed(2)}</td>`;
   }
   const t_ = Number((data.footer || {}).TOTAL) || 0;
-  h += `<td class="${t_ > 0 ? 'pos' : t_ < 0 ? 'neg' : 'zero'}">${t_ > 0 ? '+' : ''}${t_.toFixed(2)}</td></tr></tfoot>`;
+  h += `<td class="${t_ > 0 ? 'pos' : t_ < 0 ? 'neg' : 'zero'}">${t_ > 0 ? '+' : ''}${t_.toFixed(2)}</td></tr>`;
+  // Вторая строка подвала: винрейт по каждому варианту за весь отчёт
+  // (без группировки — статистика по типу входа). Пересчёт из клеток, не из футера.
+  const fstats = {};
+  cols.forEach((c) => { fstats[c] = { w: 0, d: 0 }; });
+  fstats.TOTAL = { w: 0, d: 0 };
+  (data.rows || []).forEach((r) => {
+    let b = -Infinity, hit = false;
+    cols.forEach((c) => {
+      const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
+      if (v > 0) fstats[c].w += 1;
+      if (v !== 0) fstats[c].d += 1;
+      if (v > b) b = v;
+      if (v) hit = true;
+    });
+    if (hit) {
+      fstats.TOTAL.d += 1;
+      if (b > 0) fstats.TOTAL.w += 1;
+    }
+  });
+  h += `<tr><td>WR столбец (winrate)</td><td></td>`;
+  for (const c of cols) {
+    const f = fmtWR(fstats[c].w, fstats[c].d);
+    h += `<td class="${f.cls}">${f.txt}</td>`;
+  }
+  const ft = fmtWR(fstats.TOTAL.w, fstats.TOTAL.d);
+  h += `<td class="${ft.cls}">${ft.txt}</td></tr></tfoot>`;
   t.innerHTML = h;
   $('wrap').style.display = '';
 }

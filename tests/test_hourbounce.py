@@ -14,10 +14,10 @@ def mk(px, opens=None, highs=None, lows=None, t0=BASE, tf="5m"):
     for i, c in enumerate(px):
         o = opens[i] if opens else o_prev
         h = highs[i] if highs else max(o, c) + Decimal("0.05")
-        l = lows[i] if lows else min(o, c) - Decimal("0.05")
+        lo = lows[i] if lows else min(o, c) - Decimal("0.05")
         out.append(Candle(
             t0 + i * timedelta(minutes=5), t0 + (i + 1) * timedelta(minutes=5),
-            Decimal(str(o)), Decimal(str(h)), Decimal(str(l)), Decimal(str(c)),
+            Decimal(str(o)), Decimal(str(h)), Decimal(str(lo)), Decimal(str(c)),
             Decimal("10"), tf, True,
         ))
         o_prev = c

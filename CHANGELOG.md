@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.2 (2026-09-11)
+
+### Added
+- **Winrate rows in PnL report** (`web/report.html`): each group subtotal (month/week/day/side) now renders a second row with per-variant winrate `xx.x% (wins/decided)` for all T1/SL1 … T3/SL3 columns plus the "Лучший" column; footer gains a second `WR столбец (winrate)` row with whole-report winrate per entry type (no grouping needed); win = PnL > 0, flat (0 = no entry) excluded from denominator, `—` when no decided trades, green ≥50% / red <50%
+
+### Changed
+- **Version sync**: `VERSION` 1.2.1 → 1.2.2, `pyproject.toml` 1.2.1 → 1.2.2
+
+### Fixed
+- **Ruff lint cleanup** (`src/level_tester/api/app.py`, `tests/test_hourbounce.py`): moved `VERSION` file reading below imports (E402), removed unused `compute_all_metrics` import (F401), unused `n_variants`/`total_signals`/`side_norm` locals (F841), duplicate `watch_start` dict key (F601), dead `json` import + `try/pass` in `_hb_signal_json`; renamed ambiguous `l` → `lo` in tests (E741). `ruff check src tests` passes, 82 tests green
+
 ## v1.2.1 (2026-09-11)
 
 ### Added
