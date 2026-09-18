@@ -59,6 +59,17 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <option value="week">По неделям</option>
 <option value="day">По дням</option>
 </select>
+<select id="f-sort" title="Сортировка строк: выставление / создание / касание">
+<option value="date_desc">Дата ↓</option>
+<option value="date_asc">Дата ↑</option>
+<option value="created_desc">Создан ↓</option>
+<option value="created_asc">Создан ↑</option>
+<option value="worked_desc">Касание ↓</option>
+<option value="worked_asc">Касание ↑</option>
+<option value="name_asc">Имя А→Я</option>
+<option value="name_desc">Имя Я→А</option>
+<option value="symbol_asc">Монета А→Я</option>
+</select>
 <select id="f-tf" title="Таймфрейм свечей сетки"><option value="5m">M5</option><option value="1m">M1</option></select>
 <label class="chk" title="Добавить 9 колонок Grid+БУ: стоп в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
 <button class="primary" id="btn-run">Сформировать</button>
@@ -81,7 +92,7 @@ function saveSettings() {
       search: $('f-search').value, side: $('f-side').value, limit: $('f-limit').value,
       from: $('f-from').value, to: $('f-to').value,
       traded: $('f-traded').checked, group: $('f-group').value, tf: $('f-tf').value,
-      be: $('f-be').checked,
+      be: $('f-be').checked, sort: $('f-sort').value,
     }));
   } catch (_) {}
 }
@@ -97,11 +108,33 @@ function loadSettings() {
     if (s.group) $('f-group').value = s.group;
     if (s.tf) $('f-tf').value = s.tf;
     $('f-be').checked = !!s.be;
+    if (s.sort) $('f-sort').value = s.sort;
   } catch (_) {}
 }
-['f-search', 'f-side', 'f-limit', 'f-from', 'f-to', 'f-traded', 'f-group', 'f-tf', 'f-be'].forEach((id) => {
+['f-search', 'f-side', 'f-limit', 'f-from', 'f-to', 'f-traded', 'f-group', 'f-tf', 'f-be', 'f-sort'].forEach((id) => {
   $(id).addEventListener('change', saveSettings);
 });
+
+// Порядок строк: сортировка применяется до группировки (группы идут
+// в порядке первого появления). Без даты — всегда в конец.
+function sortedRows(rows) {
+  const mode = ($('f-sort') || {}).value || 'date_desc';
+  const out = (rows || []).slice();
+  const byTs = (key, desc) => {
+    const withTs = out.filter((r) => r[key] != null).sort((a, b) => desc ? b[key] - a[key] : a[key] - b[key]);
+    return withTs.concat(out.filter((r) => r[key] == null));
+  };
+  const str = (r) => `${r.symbol || ''} ${(r.dt_place || '')}`;
+  switch (mode) {
+    case 'date_asc': return out.sort((a, b) => (a.dt_place || '') < (b.dt_place || '') ? -1 : 1);
+    case 'created_desc': case 'created_asc': return byTs('created_ts', mode === 'created_desc');
+    case 'worked_desc': case 'worked_asc': return byTs('worked_ts', mode === 'worked_desc');
+    case 'name_asc': return out.sort((a, b) => (a.signal_id || '').localeCompare(b.signal_id || ''));
+    case 'name_desc': return out.sort((a, b) => (b.signal_id || '').localeCompare(a.signal_id || ''));
+    case 'symbol_asc': return out.sort((a, b) => str(a) < str(b) ? -1 : 1);
+    default: return out.sort((a, b) => (a.dt_place || '') < (b.dt_place || '') ? 1 : -1);
+  }
+}
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -231,6 +264,7 @@ function winrateRow(label, stats, cols, ncols) {
 function renderTable(data, groupMode) {
   const t = $('tbl');
   const cols = data.columns;
+  data = Object.assign({}, data, { rows: sortedRows(data.rows) });
   const head2 = `<th title="Реальная сделка в архиве БД">Arch факт</th>`;
   let h = `<thead><tr><th>Сигнал</th>${head2}${cols.map((c) => `<th>${c}</th>`).join('')}<th>Лучший</th></tr></thead><tbody>`;
   const groups = {};
@@ -345,6 +379,10 @@ $('f-group').addEventListener('change', () => {
   saveSettings();
   if (lastData) renderTable(lastData, $('f-group').value);
 });
+$('f-sort').addEventListener('change', () => {
+  saveSettings();
+  if (lastData) renderTable(lastData, $('f-group').value);
+});
 
 loadSettings();
 
@@ -361,7 +399,7 @@ $('btn-csv').onclick = () => {
     return anyTrade ? [bc, (bv > 0 ? '+' : '') + bv.toFixed(2)] : ['—', ''];
   };
   const lines = [['signal', 'symbol', 'side', 'level', 'dt_place', 'traded', 'arch_status', 'arch_pnl', ...cols, 'best_variant', 'best_pnl'].join(';')];
-  for (const r of lastData.rows) {
+  for (const r of sortedRows(lastData.rows)) {
     const [bcol, bpnl] = bestOf(r);
     lines.push([r.signal_id, r.symbol, r.side, r.level_price, r.dt_place,
       r.traded ? '1' : '0', r.arch_status || '', r.arch_pnl != null ? String(r.arch_pnl).replace('.', ',') : '',

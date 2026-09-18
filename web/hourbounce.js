@@ -498,6 +498,7 @@ async function loadMatrix() {
     box.appendChild(rh);
     [1, 2, 3].forEach((sl) => {
       const cell = d.cells.find((c) => c.entry === code && c.sl_index === sl);
+      if (!cell) { console.warn('[hourbounce] нет ячейки', code, 'SL' + sl, '— пропуск (версии фронта/бэка расходятся?)'); return; }
       const card = document.createElement('div');
       const hl = (code + '|' + sl) === bestKey ? (bestRed ? ' best-stop' : ' best-take') : '';
       const isReal = !!(real && real.entry === code && real.sl_index === sl);

@@ -1310,7 +1310,7 @@ async def hourbounce_signals(
     date_from: str = Query(default="", description="YYYY-MM-DD: сигналы с этой даты выставления (UTC)"),
     date_to: str = Query(default="", description="YYYY-MM-DD: сигналы по эту дату выставления (UTC)"),
     sort: str = Query(default="date_desc",
-                       description="date_desc|date_asc|name_asc|name_desc|symbol_asc"),
+                       description="date_desc|date_asc|created_desc|created_asc|worked_desc|worked_asc|name_asc|name_desc|symbol_asc"),
     traded_only: bool = Query(default=False,
                               description="только реально отторгованные (status closed_*); применяется ДО лимита"),
 ) -> dict[str, Any]:
@@ -1412,6 +1412,8 @@ async def hourbounce_signals(
                     continue
             except ValueError:
                 pass
+        _created_dt = _hb_parse_time(s.timestamp)
+        _worked_dt = _hb_parse_time(extra.get("touch_ref"))
         items.append({
             "signal_id": s.signal_id,
             "symbol": s.symbol,
@@ -1420,6 +1422,8 @@ async def hourbounce_signals(
             "dt_place": dt_place,
             "dt_place_ts": int(dt_place_dt.timestamp()) if dt_place_dt else None,
             "created_at": s.timestamp,
+            "created_ts": int(_created_dt.timestamp()) if _created_dt else None,
+            "worked_ts": int(_worked_dt.timestamp()) if _worked_dt else None,
             "touch_ref": extra.get("touch_ref"),
             "daily_volume": None,
             "natr": None,
@@ -1442,8 +1446,20 @@ async def hourbounce_signals(
         # старые отторгованные (баг отчёта «только сигналы 7–15.09 без фильтра дат»).
         items = [d for d in items
                  if isinstance(d.get("status"), str) and d["status"].startswith("closed_")]
+    def _sort_ts(key: str, desc: bool) -> None:
+        # сортировка по числовому timestamp; без даты — всегда в конец
+        nonlocal items
+        with_ts = [d for d in items if d.get(key) is not None]
+        without = [d for d in items if d.get(key) is None]
+        with_ts.sort(key=lambda d: d[key], reverse=desc)
+        items = with_ts + without
+
     if sort == "date_asc":
         items.sort(key=lambda d: d["dt_place"] or "")
+    elif sort in ("created_desc", "created_asc"):
+        _sort_ts("created_ts", sort == "created_desc")
+    elif sort in ("worked_desc", "worked_asc"):
+        _sort_ts("worked_ts", sort == "worked_desc")
     elif sort == "name_asc":
         items.sort(key=lambda d: (d["signal_id"] or "").lower())
     elif sort == "name_desc":
@@ -2196,9 +2212,15 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                 best = max((cells[c]["pnl"] for c in columns), default=0.0)
                 any_hit = any(cells[c]["pnl"] for c in columns)
                 footer_best = round(footer_best + (round(best, 2) if any_hit else 0.0), 2)
+                # числовые метки для сортировки строк (форматы дат в архиве смешанные)
+                _created_dt = _hb_parse_time(sig.get("created_at"))
+                _worked_dt = _hb_parse_time(sig.get("touch_ref"))
                 rows.append({
                     "signal_id": sid, "symbol": sig["symbol"], "side": sig["side"],
                     "level_price": sig["level_price"], "dt_place": sig["dt_place"],
+                    "created_at": sig.get("created_at"), "touch_ref": sig.get("touch_ref"),
+                    "created_ts": int(_created_dt.timestamp()) if _created_dt else None,
+                    "worked_ts": int(_worked_dt.timestamp()) if _worked_dt else None,
                     "outcome_arch": None, "cells": cells, "row_total": row_total,
                     "best_pnl": best,
                     "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
@@ -2208,6 +2230,8 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                 logger.debug("hourbounce report signal failed: %s", sid, exc_info=True)
                 rows.append({"signal_id": sid, "symbol": "?", "side": "?",
                              "level_price": None, "dt_place": None, "outcome_arch": None,
+                             "created_at": None, "touch_ref": None,
+                             "created_ts": None, "worked_ts": None,
                              "cells": {c: {"pnl": 0.0, "outcome": "ERROR"} for c in columns},
                              "row_total": 0.0, "error": str(exc)[:200],
                              "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
