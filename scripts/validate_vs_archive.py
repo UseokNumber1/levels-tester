@@ -10,7 +10,7 @@
 - PnL%: архивный pnl_percent против знакового (exit-entry)/entry*100 реплея.
 
 Заведомые расхождения (не баги, фиксируем как допуски):
-- вход: наш T1/T2/T3 (open/level) против реального маркет/лимит-филла PGv2;
+- вход: наш T1M/T2/T3 (маркет-M1/open) против реального маркет/лимит-филла PGv2;
 - комиссии и парциал breakeven_fix 50% не моделируем (наш PnL — гросс);
 - closed_be_filled: PGv2 мог фиксить часть позиции (be_fix), у нас — полный выход.
 """
@@ -85,7 +85,7 @@ def main() -> int:
     reader = SignalReader(TRADING_DB, ARCHIVE_DB)
     rows = load_closed(args.limit)
 
-    print(f"{'symbol':12} {'tf':3} {'side':5} {'arch':6} {'archPnL':>8} | {'PG':4} {'наш T1':4} {'наш T2':4} {'наш T3':4} | {'PnL наш/арх (PG)':>22} | итог")
+    print(f"{'symbol':12} {'tf':3} {'side':5} {'arch':6} {'archPnL':>8} | {'PG':4} {'наш T1M':5} {'наш T2':4} {'наш T3':4} | {'PnL наш/арх (PG)':>22} | итог")
     print("-" * 130)
     match = mismatch = skipped = 0
     for a in rows:
@@ -123,6 +123,7 @@ def main() -> int:
         )
         try:
             candles = client.klines(sig.symbol, tf, start, end)
+            m1 = client.klines(sig.symbol, "1m", start, end)
         except Exception as exc:
             print(f"{a['symbol']:12} свечи не загрузились: {exc}")
             skipped += 1
@@ -133,7 +134,7 @@ def main() -> int:
             continue
         outs = {}
         # PG-режим 1:1: required баров подряд СЧИТАЯ касание + параметры сделки.
-        # Рядом для контекста T-сетка (касание не считается).
+        # Рядом для контекста T-сетка (T1M — маркет на касании по M1, T2/T3 — M5).
         try:
             req = int(a.get("req_bars") or 2)
         except (TypeError, ValueError):
@@ -142,10 +143,11 @@ def main() -> int:
                            signal_time=sig_time, candles=candles, entry_code="PG",
                            sl_index=0, config=DEFAULT_CONFIG, exec_params=ex,
                            pg_required=req)
-        for code in ("T1", "T2", "T3"):
+        for code in ("T1M", "T2", "T3"):
             r = review_signal(side=sig.side, level_price=Decimal(str(sig.entry_price)),
                               signal_time=sig_time, candles=candles, entry_code=code,
-                              sl_index=0, config=DEFAULT_CONFIG, exec_params=ex)
+                              sl_index=0, config=DEFAULT_CONFIG, exec_params=ex,
+                              m1_candles=m1)
             outs[code] = r.outcome
         if pg.entry_price and pg.exit_price and pg.outcome in ("TAKE", "STOP"):
             e, x = float(pg.entry_price), float(pg.exit_price)
@@ -166,7 +168,7 @@ def main() -> int:
         pg_in = pg.entry_price if pg.entry_price else None
         pg_out = pg.exit_price if pg.exit_price else None
         print(f"{a['symbol']:12} {tf:3} {sig.side:5} {a_out:6} {a_pnl if a_pnl is not None else '?':>8} | "
-              f"PG:{ours:4} T1:{outs['T1']:4} T2:{outs['T2']:4} T3:{outs['T3']:4} | "
+              f"PG:{ours:4} T1M:{outs['T1M']:4} T2:{outs['T2']:4} T3:{outs['T3']:4} | "
               f"{o_pnl if o_pnl is not None else '—':>8} / {a_pnl if a_pnl is not None else '?':>8} | {flag} "
               f"[req {req} {sl_info} вход PG/арх {pg_in}/{a['entry_price']} вых PG/арх {pg_out}/{a['exit_price']}]")
     print("-" * 130)

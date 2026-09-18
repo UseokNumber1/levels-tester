@@ -1038,7 +1038,7 @@ def _last_closed_boundary() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# HourBounce Review Lite: один сигнал из архива PGv2 -> реплей T1/T2/T3 x SL
+# HourBounce Review Lite: один сигнал из архива PGv2 -> реплей T1M/T2/T3 x SL
 # ---------------------------------------------------------------------------
 def _hb_parse_time(raw: str | None) -> datetime | None:
     if not raw:
@@ -1138,7 +1138,7 @@ def _hb_arch_outcome(status: str | None, close_reason: str | None) -> str:
     return "EXPIRED"
 
 
-_HB_REQ_TO_ENTRY = {0: "T1", 1: "T2", 2: "T3"}
+_HB_REQ_TO_ENTRY = {0: "T1M", 1: "T2", 2: "T3"}
 _HB_SL_GRID = (0.5, 1.0, 1.5)
 
 
@@ -1165,9 +1165,10 @@ def _hb_real_trade_info(
     pnl_percent: float | str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Карта реальной архивной сделки на сетку T1/T2/T3 × SL1/SL2/SL3.
+    """Карта реальной архивной сделки на сетку T1M/T2/T3 × SL1/SL2/SL3.
 
-    entry: confirmation_bars_required 0->T1, 1->T2, 2->T3 (иначе None).
+    entry: confirmation_bars_required 0->T1M (маркет на касании, ближайший по
+    смыслу к req=0), 1->T2, 2->T3 (иначе None).
     sl_index: ближайший к stop_loss_pct из metadata, иначе |sl-entry|/entry.
     Возвращает None, если сделка не отторгована (нет closed_* статуса)
     или привязку построить не из чего.
@@ -1304,12 +1305,14 @@ async def hourbounce_signals(
     symbol: str = "",
     side: str = "",
     period: str = "",
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=5000),
     search: str = "",
     date_from: str = Query(default="", description="YYYY-MM-DD: сигналы с этой даты выставления (UTC)"),
     date_to: str = Query(default="", description="YYYY-MM-DD: сигналы по эту дату выставления (UTC)"),
     sort: str = Query(default="date_desc",
                        description="date_desc|date_asc|name_asc|name_desc|symbol_asc"),
+    traded_only: bool = Query(default=False,
+                              description="только реально отторгованные (status closed_*); применяется ДО лимита"),
 ) -> dict[str, Any]:
     import sqlite3 as _sqlite3
     from datetime import date as _date
@@ -1322,7 +1325,7 @@ async def hourbounce_signals(
         side=None,  # фильтр ниже по точному совпадению LONG/SHORT/ALL
         period_start=period_start,
         period_end=period_end,
-        limit=500,
+        limit=5000,  # потолок с запасом: архив уже >400 строк и растёт; режем ниже через limit
         include_trading=False,
         include_archive=True,
     )
@@ -1434,6 +1437,11 @@ async def hourbounce_signals(
             "pg_available": s.stop_loss is not None,
             "source": s.source,
         })
+    if traded_only:
+        # Серверный фильтр ДО лимита: иначе traded среди топ-N свежих отсекал
+        # старые отторгованные (баг отчёта «только сигналы 7–15.09 без фильтра дат»).
+        items = [d for d in items
+                 if isinstance(d.get("status"), str) and d["status"].startswith("closed_")]
     if sort == "date_asc":
         items.sort(key=lambda d: d["dt_place"] or "")
     elif sort == "name_asc":
@@ -1464,13 +1472,14 @@ def _hb_resolve_signal(signal_id: str) -> tuple[Any, dict[str, Any], str | None,
     return sig, meta, dt_place_str, sig_time, side, price_spec
 
 
-def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec) -> dict[str, Any]:
+def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf: str = "5m") -> dict[str, Any]:
     try:
         place_ts = int(datetime.strptime(str(dt_place_str), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC).timestamp())
     except (ValueError, TypeError):
         place_ts = int(sig_time.timestamp())
     return {
         "signal_id": sig.signal_id, "symbol": sig.symbol, "side": side,
+        "tf": tf,
         "level_price": sig.entry_price, "dt_place": dt_place_str,
         "place_ts": place_ts, "place_dt_iso": sig_time.isoformat(),
         "created_at": sig.timestamp, "touch_ref": meta.get("touch_ref"),
@@ -1481,37 +1490,54 @@ def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec) -> dic
 
 
 def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
-                     refresh: bool = False) -> dict[str, Any]:
-    """Матрица 9 ячеек HourBounce (сетка SL).
+                     refresh: bool = False, tf: str = "5m",
+                     exec_mode: str = "grid") -> dict[str, Any]:
+    """Матрица 9 ячеек HourBounce (T1M/T2/T3 × SL, сетка).
 
-    Свечи: сначала БД (кеш 5m), дыры догружаются с Binance идемпотентно.
-    Ячейки: кеш hb_reviews по (signal_id, config_fp, lookforward); пересчёт —
-    при промахе, refresh=1 или когда догрузились новые свечи (закрыли дыры).
+    Свечи ТФ (5m/1m): сначала БД, дыры догружаются с Binance идемпотентно.
+    T1M дополнительно тянет M1-ряд того же окна (маркет на касании).
+    lookforward/pre/post — бары запрошенного ТФ. exec_mode: grid (голый
+    трейлинг 1%/1%) или grid_be (SL сетки + БУ из конфига + трейлинг после БУ).
+    Ячейки: кеш hb_reviews по (signal_id, config_fp[ТФ+режим], lookforward);
+    пересчёт — при промахе, refresh=1 или когда догрузились новые свечи.
     Срезы lo/hi считаются под запрошенные pre/post при каждом вызове.
     """
-    from level_tester.backtester.hourbounce import DEFAULT_CONFIG, review_matrix
+    from level_tester.backtester.hourbounce import (
+        config_for_tf, grid_be_exec, grid_exec, review_matrix, review_signal, step_for_tf,
+    )
     from level_tester.infrastructure.hourbounce_store import (
         get_review_payload, load_candles_cached, put_review_payload,
     )
 
     sig, meta, dt_place_str, sig_time, side, price_spec = _hb_resolve_signal(signal_id)
+    cfg = config_for_tf(tf)
+    step = step_for_tf(tf)
 
-    start = sig_time - pre * timedelta(minutes=5)
-    # формирующаяся свеча меняется при каждом запросе — режем конец по последней закрытой M5
+    start = sig_time - pre * timedelta(minutes=step)
+    # формирующаяся свеча меняется при каждом запросе — режем конец по последней закрытой свече ТФ
     _now = datetime.now(UTC)
-    now_floor = _now.replace(minute=(_now.minute // 5) * 5, second=0, microsecond=0)
-    end = min(sig_time + lookforward * timedelta(minutes=5), now_floor)
+    now_floor = _now.replace(minute=(_now.minute // step) * step, second=0, microsecond=0)
+    end = min(sig_time + lookforward * timedelta(minutes=step), now_floor)
     try:
         candles, cache_stats = load_candles_cached(
-            session_factory, binance_client, sig.symbol, start, end, refresh=refresh)
+            session_factory, binance_client, sig.symbol, start, end, refresh=refresh, tf=tf)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"candle load failed: {exc}") from exc
     if not candles:
         raise HTTPException(status_code=502, detail="no candles returned")
+    # T1M считается на M1 (маркет на касании). При tf=1m основной ряд уже минутный.
+    m1_candles = candles if tf == "1m" else None
+    if m1_candles is None:
+        try:
+            m1_candles, _m1_stats = load_candles_cached(
+                session_factory, binance_client, sig.symbol, start, end, refresh=refresh, tf="1m")
+        except Exception:  # noqa: BLE001 - без M1 ячейки T1M дадут NO_ENTRY/no_m1
+            logger.debug("hourbounce matrix M1 load failed: %s", signal_id, exc_info=True)
+            m1_candles = None
 
     is_long = side == "LONG"
     lvl = Decimal(str(sig.entry_price))
-    eng_window = [c for c in candles if c.open_time >= sig_time][: DEFAULT_CONFIG.life_window_t]
+    eng_window = [c for c in candles if c.open_time >= sig_time][: cfg.life_window_t]
     window_end = eng_window[-1].close_time if eng_window else None
     window_last = eng_window[-1].open_time.isoformat() if eng_window else None
     window_count = len(eng_window)
@@ -1521,31 +1547,35 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
         and ((c.low <= lvl) if is_long else (c.high >= lvl))
     )
 
-    signal_block = _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec)
+    signal_block = _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf)
 
     cells: list[dict[str, Any]] | None = None
     if not refresh:
         try:
             with session_factory() as session:
-                hit = get_review_payload(session, signal_id, lookforward)
+                hit = get_review_payload(session, signal_id, lookforward, tf, exec_mode)
         except Exception:
             hit = None
         if hit and isinstance(hit.get("cells"), list) and len(hit["cells"]) == 9:
             # хвост за окном жизни на итог не влияет — сверяем границу и размер
-            # окна: тогда каждая новая M5-свеча кеш не инвалидирует, а закрытые
-            # дыры внутри окна (счётчик/граница изменились) — инвалидируют
+            # окна: тогда каждая новая свеча кеш не инвалидирует, а закрытые
+            # дыры внутри окна (счётчик/граница изменились) — инвалидируют.
+            # Плюс состав входов: старый кеш хранит T1, актуальный — T1M.
             if hit.get("window_last") == window_last and hit.get("window_count") == window_count:
-                cells = hit["cells"]
+                if {c.get("entry") for c in hit["cells"]} == {"T1M", "T2", "T3"}:
+                    cells = hit["cells"]
     cells_hit = cells is not None
     if cells is None:
         results = review_matrix(
             side=side, level_price=Decimal(str(sig.entry_price)),
-            signal_time=sig_time, candles=candles, config=DEFAULT_CONFIG,
+            signal_time=sig_time, candles=candles, config=cfg,
+            exec_mode=exec_mode,  # type: ignore[arg-type]
+            m1_candles=m1_candles,
         )
         cells = []
         for res in results:
             j = _hb_result_json(res, side)
-            j["sl_pct"] = str(DEFAULT_CONFIG.sl_sizes[res.sl_index - 1])
+            j["sl_pct"] = str(cfg.sl_sizes[res.sl_index - 1])
             cells.append(j)
         try:
             with session_factory() as session:
@@ -1555,9 +1585,30 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
                      "window_end": window_end.isoformat() if window_end else None,
                      "window_last": window_last, "window_count": window_count,
                      "touches_outside": touches_outside},
-                    candles[0].open_time, candles[-1].close_time)
+                    candles[0].open_time, candles[-1].close_time, tf, exec_mode)
         except Exception:
             pass
+
+    # T1M всегда считается свежо поверх кеша: валидность hb_reviews привязана
+    # к M5-окну (window_last/count) и не видит изменений M1-ряда. Если T1M
+    # однажды посчитался на дырявых M1 (ложный NO_ENTRY), кеш отдавал бы его
+    # вечно. T2/T3 из кеша оставляем — они M5-зависимы и окном покрыты.
+    # Свежий пересчёт тем же review_matrix уже использовал эти же M1.
+    if cells_hit and m1_candles:
+        try:
+            fresh_t1m = []
+            for _sl in (1, 2, 3):
+                _ex = grid_be_exec(_sl, cfg) if exec_mode == "grid_be" else grid_exec(_sl, cfg)
+                _res = review_signal(
+                    side=side, level_price=Decimal(str(sig.entry_price)),
+                    signal_time=sig_time, candles=candles, entry_code="T1M",
+                    sl_index=_sl, config=cfg, exec_params=_ex, m1_candles=m1_candles)
+                _j = _hb_result_json(_res, side)
+                _j["sl_pct"] = str(cfg.sl_sizes[_sl - 1])
+                fresh_t1m.append(_j)
+            cells = [c for c in cells if c.get("entry") != "T1M"] + fresh_t1m
+        except Exception:  # noqa: BLE001 - при сбое оставляем кешированные ячейки
+            logger.debug("hourbounce T1M refresh failed: %s", signal_id, exc_info=True)
 
     by_open = {c.open_time: i for i, c in enumerate(candles)}
     try:
@@ -1601,7 +1652,9 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
 
     return {
         "signal": signal_block,
-        "sl_sizes": [str(s) for s in DEFAULT_CONFIG.sl_sizes],
+        "tf": tf,
+        "exec_mode": exec_mode,
+        "sl_sizes": [str(s) for s in cfg.sl_sizes],
         "window_end": window_end.isoformat() if window_end else None,
         "touches_outside": touches_outside,
         "sig_idx": sig_idx,
@@ -1617,27 +1670,29 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
 
 
 def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
-                     refresh: bool = False) -> dict[str, Any]:
+                     refresh: bool = False, tf: str = "5m") -> dict[str, Any]:
     """Одна ячейка в режиме сделки PGv2 1:1: подтверждает required_bars подряд
     СЧИТАЯ свечу касания (как confirmation_loop.py), вход по open следующей,
-    SL/TP/BE/trailing из архива. Свечи — из кеша БД. Результат не кешируем.
+    SL/TP/BE/trailing из архива. Свечи ТФ — из кеша БД. Результат не кешируем.
     """
-    from level_tester.backtester.hourbounce import DEFAULT_CONFIG, exec_from_signal, review_signal
+    from level_tester.backtester.hourbounce import config_for_tf, exec_from_signal, review_signal, step_for_tf
     from level_tester.infrastructure.hourbounce_store import load_candles_cached
 
     sig, meta, dt_place_str, sig_time, side, price_spec = _hb_resolve_signal(signal_id)
+    cfg = config_for_tf(tf)
+    step = step_for_tf(tf)
     ex = exec_from_signal(sig)
     if ex is None:
         return {"pg_available": False,
                 "pg_reason": "в архиве нет stop_loss — режим сделки недоступен",
-                "signal": _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec)}
-    start = sig_time - pre * timedelta(minutes=5)
+                "signal": _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf)}
+    start = sig_time - pre * timedelta(minutes=step)
     _now = datetime.now(UTC)
-    now_floor = _now.replace(minute=(_now.minute // 5) * 5, second=0, microsecond=0)
-    end = min(sig_time + lookforward * timedelta(minutes=5), now_floor)
+    now_floor = _now.replace(minute=(_now.minute // step) * step, second=0, microsecond=0)
+    end = min(sig_time + lookforward * timedelta(minutes=step), now_floor)
     try:
         candles, cache_stats = load_candles_cached(
-            session_factory, binance_client, sig.symbol, start, end, refresh=refresh)
+            session_factory, binance_client, sig.symbol, start, end, refresh=refresh, tf=tf)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"candle load failed: {exc}") from exc
     if not candles:
@@ -1646,10 +1701,12 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
     res = review_signal(
         side=side, level_price=Decimal(str(sig.entry_price)), signal_time=sig_time,
         candles=candles, entry_code="PG", sl_index=0,
-        config=DEFAULT_CONFIG, exec_params=ex,
+        config=cfg, exec_params=ex,
         pg_required=int(meta.get("required_bars", 2)),
     )
     all_ts = [c.open_time for c in candles]
+    # запас контекста графика — по времени: множитель относительно M5
+    k = 5 // step
     try:
         sig_idx = next(i for i, c in enumerate(candles) if c.open_time >= sig_time)
     except StopIteration:
@@ -1663,9 +1720,9 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
                 if c.close_time >= res.exit_dt or c.open_time >= res.exit_dt:
                     end_idx = i
                     break
-        lo, hi = max(0, anchor - pre), min(len(candles), end_idx + 1 + 30)
+        lo, hi = max(0, anchor - pre), min(len(candles), end_idx + 1 + 30 * k)
     else:
-        lo, hi, mode = max(0, sig_idx - pre), min(len(candles), sig_idx + 96), "placement"
+        lo, hi, mode = max(0, sig_idx - pre), min(len(candles), sig_idx + 96 * k), "placement"
 
     def _c(c) -> dict[str, Any]:
         return {
@@ -1689,7 +1746,8 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
             "trail": f"{ex.trail_activation_pct}/{ex.trail_distance_pct}" if ex.use_trail else None,
             "trail_tp_only": ex.trail_tp_only,
         },
-        "signal": _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec),
+        "signal": _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf),
+        "tf": tf,
         "params": {"entry": entry, "sl_index": 0, "sl_pct": None, "mode": "signal"},
         "result": result,
         "candles": [_c(c) for c in candles[lo:hi]],
@@ -1704,19 +1762,21 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
 @app.get("/api/hourbounce/review")
 async def hourbounce_review(
     signal_id: str = Query(min_length=1),
-    entry: str = Query(default="T1", pattern=r"^(T1|T2|T3)$"),
+    entry: str = Query(default="T1M", pattern=r"^(T1M|T2|T3)$"),
     sl: int = Query(default=1, ge=1, le=3),
-    lookforward: int = Query(default=2000, ge=20, le=20000),
-    pre: int = Query(default=30, ge=0, le=200),
-    post: int = Query(default=30, ge=0, le=200),
+    lookforward: int = Query(default=2000, ge=20, le=100000),
+    pre: int = Query(default=30, ge=0, le=1500),
+    post: int = Query(default=30, ge=0, le=1500),
     refresh: bool = Query(default=False),
     mode: str = Query(default="grid", pattern=r"^(grid|signal)$"),
+    tf: str = Query(default="5m", pattern=r"^(5m|1m)$"),
 ) -> dict[str, Any]:
     """Одна ячейка. grid = сетка SL; signal = сделка PGv2 1:1. Окно графика —
-    от касания; если касания нет — окрестность выставления (mode=placement)."""
+    от касания; если касания нет — окрестность выставления (mode=placement).
+    lookforward/pre/post — бары ТФ (tf=5m|1m)."""
     if mode == "signal":
-        return _hb_build_single(signal_id, entry, lookforward, pre, refresh=refresh)
-    data = _hb_build_matrix(signal_id, lookforward, pre, post, refresh=refresh)
+        return _hb_build_single(signal_id, entry, lookforward, pre, refresh=refresh, tf=tf)
+    data = _hb_build_matrix(signal_id, lookforward, pre, post, refresh=refresh, tf=tf)
     cell = next((c for c in data["cells"] if c["entry"] == entry and c["sl_index"] == sl), None)
     if cell is None:
         raise HTTPException(status_code=404, detail="cell not found")
@@ -1726,9 +1786,11 @@ async def hourbounce_review(
         lo, hi, mode = cell["lo"], cell["hi"], "touch"
     else:
         # касания нет: показываем окрестность выставления, а не 1000 баров пустоты
+        from level_tester.backtester.hourbounce import step_for_tf
+        k = 5 // step_for_tf(tf)  # запас контекста — по времени
         sig_idx = data["sig_idx"]
         lo = max(0, sig_idx - pre)
-        hi = min(len(candles), sig_idx + 163)  # 96 + 70%: столько же контекста, как в обычном окне
+        hi = min(len(candles), sig_idx + 163 * k)  # 96 + 70%: столько же контекста, как в обычном окне
         cell = dict(cell)
         cell["lo"], cell["hi"] = lo, hi
         mode = "placement"
@@ -1811,25 +1873,32 @@ def _hb_result_json(res, side: str | None = None) -> dict[str, Any]:
 @app.get("/api/hourbounce/matrix")
 async def hourbounce_matrix(
     signal_id: str = Query(min_length=1),
-    lookforward: int = Query(default=2000, ge=20, le=20000),
-    pre: int = Query(default=30, ge=0, le=200),
-    post: int = Query(default=30, ge=0, le=200),
+    lookforward: int = Query(default=2000, ge=20, le=100000),
+    pre: int = Query(default=30, ge=0, le=1500),
+    post: int = Query(default=30, ge=0, le=1500),
     refresh: bool = Query(default=False),
+    tf: str = Query(default="5m", pattern=r"^(5m|1m)$"),
+    exec_mode: str = Query(default="grid", pattern=r"^(grid|grid_be)$"),
 ) -> dict[str, Any]:
-    """Все 9 комбинаций T1/T2/T3 x SL1/SL2/SL3 за одну загрузку свечей (с кешем)."""
-    return _hb_build_matrix(signal_id, lookforward, pre, post, refresh=refresh)
+    """Все 9 комбинаций T1M/T2/T3 x SL1/SL2/SL3 за одну загрузку свечей (с кешем).
+    lookforward/pre/post — бары ТФ (tf=5m|1m). exec_mode: grid или grid_be."""
+    return _hb_build_matrix(signal_id, lookforward, pre, post, refresh=refresh, tf=tf,
+                            exec_mode=exec_mode)
 
 
 @app.get("/api/hourbounce/export")
 async def hourbounce_export(
     signal_id: str = Query(min_length=1),
-    lookforward: int = Query(default=2000, ge=20, le=20000),
+    lookforward: int = Query(default=2000, ge=20, le=100000),
+    tf: str = Query(default="5m", pattern=r"^(5m|1m)$"),
 ) -> FileResponse:
     """Self-contained HTML: 9 графиков + события + шапка сигнала."""
     import json as _json
     import tempfile as _tmp
 
-    data = await hourbounce_matrix(signal_id=signal_id, lookforward=lookforward, pre=30, post=30)  # type: ignore[arg-type]
+    from level_tester.backtester.hourbounce import step_for_tf as _sft
+    _k = 5 // _sft(tf)  # окно среза — по времени, как в матрице
+    data = await hourbounce_matrix(signal_id=signal_id, lookforward=lookforward, pre=30 * _k, post=30 * _k, tf=tf)  # type: ignore[arg-type]
     payload = _json.dumps(data, ensure_ascii=False)
     sig = data["signal"]
     cards = ""
@@ -1858,8 +1927,8 @@ async def hourbounce_export(
 .chart{height:220px}table{border-collapse:collapse;font-size:12px;margin-top:16px;width:100%}
 td,th{border:1px solid #2a323d;padding:4px 8px;font-family:monospace;text-align:left}.mt{padding:6px 10px;color:#8b96a5;font-family:monospace;font-size:11px}</style>
 </head><body>
-<h2>__SYM__ · __SIDE__ · level __LVL__ · __DT__</h2>
-<p>TP(arch) __TP__ · SL(arch) __SL__ · конфиг trail +1%/1%, окно подтверждения 20, окно жизни: вся история до ближайшей отработки</p>
+<h2>__SYM__ · __SIDE__ · __TF__ · level __LVL__ · __DT__</h2>
+<p>TP(arch) __TP__ · SL(arch) __SL__ · конфиг trail +1%/1%, окно подтверждения __CW__ (по времени), окно жизни: вся история до ближайшей отработки</p>
 <div class="grid">__CARDS__</div>
 <table><tr><th>cell</th><th>seq</th><th>type</th><th>dt</th><th>price</th></tr>__ROWS__</table>
 <script id="hb-data" type="application/json">__PAYLOAD__</script>
@@ -1892,8 +1961,11 @@ for(const cell of D.cells){
  ch.timeScale().fitContent();
 }
 </script></body></html>"""
+    from level_tester.backtester.hourbounce import config_for_tf as _cft
     html = (html.replace("__SYM__", str(sig["symbol"])).replace("__SID__", str(sig["signal_id"]))
             .replace("__SIDE__", str(sig["side"])).replace("__LVL__", str(sig["level_price"]))
+            .replace("__TF__", str(data.get("tf", tf)).upper())
+            .replace("__CW__", str(_cft(data.get("tf", tf)).confirm_window_w))
             .replace("__DT__", str(sig["dt_place"])).replace("__TP__", str(sig.get("tp_arch")))
             .replace("__SL__", str(sig.get("sl_arch"))).replace("__CARDS__", cards)
             .replace("__ROWS__", rows).replace("__PAYLOAD__", payload))
@@ -1905,10 +1977,36 @@ for(const cell of D.cells){
 
 
 # ---------------------------------------------------------------------------
-# PnL-отчёт: все сигналы × 9 комбинаций (T1/T2/T3 × SL1/SL2/SL3).
+# PnL-отчёт: все сигналы × 9 комбинаций (T1M/T2/T3 × SL1/SL2/SL3).
+# T1M — маркет на касании (триггер и исполнение полностью на M1, вход по принту=level).
+# T2/T3 — входы с подтверждением на M5 (матрица считает их сама, здесь переиспользуются).
+# T0/T1/T1L остаются в движке для исследований, но в отчёт не входят.
 # Клетка = PnL% со знаком стороны (нет входа -> 0), подвал = суммы по столбцам.
 # ---------------------------------------------------------------------------
-HB_REPORT_COLS = [f"{t}/SL{s}" for t in ("T1", "T2", "T3") for s in (1, 2, 3)]
+HB_REPORT_COLS = [f"{t}/SL{s}" for t in ("T1M", "T2", "T3") for s in (1, 2, 3)]
+# Колонки Grid+БУ: те же входы/стопы, но со стопом в БУ (триггер/лок из конфига)
+# и трейлингом строго после БУ. Ключ базовой колонки = без суффикса "+БУ".
+# В отчёте колонка +БУ идёт сразу за своей базовой (чередование, см. _hb_report_columns).
+HB_BE_SUFFIX = "+БУ"
+HB_BE_COLS = [f"{t}{HB_BE_SUFFIX}/SL{s}" for t in ("T1M", "T2", "T3") for s in (1, 2, 3)]
+
+
+def _hb_be_base_col(col: str) -> str:
+    return col.replace(HB_BE_SUFFIX, "")
+
+
+def _hb_report_columns(with_be: bool) -> list[str]:
+    """Колонки отчёта. С БУ — чередование: колонка +БУ сразу за своей базовой
+    (T1M/SL1, T1M+БУ/SL1, T1M/SL2, ...), а не блоком в конце."""
+    if not with_be:
+        return list(HB_REPORT_COLS)
+    out: list[str] = []
+    for base in HB_REPORT_COLS:
+        out.append(base)
+        be_col = base.replace("/SL", f"{HB_BE_SUFFIX}/SL")
+        if be_col in HB_BE_COLS:
+            out.append(be_col)
+    return out
 
 _hb_report_jobs: dict[str, dict[str, Any]] = {}
 _hb_report_counter = 0
@@ -1930,8 +2028,10 @@ def _hb_cell_pnl(cell: dict[str, Any], side: str) -> float:
 
 
 class HbReportRequest(BaseModel):
-    signal_ids: list[str] = Field(min_length=1, max_length=500)
-    lookforward: int = Field(default=2000, ge=20, le=20000)
+    signal_ids: list[str] = Field(min_length=1, max_length=5000)
+    lookforward: int = Field(default=2000, ge=20, le=100000)
+    tf: str = Field(default="5m", pattern=r"^(5m|1m)$")
+    with_be: bool = Field(default=False, description="Добавить 9 колонок Grid+БУ (стоп в БУ из конфига)")
 
 
 @app.post("/api/hourbounce/report", status_code=202)
@@ -1941,9 +2041,10 @@ async def hourbounce_report_run(request: HbReportRequest) -> dict[str, Any]:
     job_id = f"hbr_{_hb_report_counter}"
     _hb_report_jobs[job_id] = {
         "status": "pending", "done": 0, "total": len(request.signal_ids),
-        "current": "", "result": None, "error": None,
+        "current": "", "result": None, "error": None, "tf": request.tf,
+        "with_be": request.with_be,
     }
-    Thread(target=_run_hb_report, args=(job_id, request.signal_ids, request.lookforward), daemon=True).start()
+    Thread(target=_run_hb_report, args=(job_id, request.signal_ids, request.lookforward, request.tf, request.with_be), daemon=True).start()
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -1999,10 +2100,12 @@ def _hb_archive_trades(signal_ids: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None:
+def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str = "5m",
+                   with_be: bool = False) -> None:
     job = _hb_report_jobs[job_id]
+    columns = _hb_report_columns(with_be)
     rows: list[dict[str, Any]] = []
-    footer = {c: 0.0 for c in HB_REPORT_COLS}
+    footer = {c: 0.0 for c in columns}
     footer_best = 0.0
     try:
         job["status"] = "running"
@@ -2011,14 +2114,77 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
             job["current"] = sid
             info = arch.get(sid, {})
             try:
-                data = _hb_build_matrix(sid, lookforward, 30, 30)
+                data = _hb_build_matrix(sid, lookforward, 30, 30, tf=tf, exec_mode="grid")
+                data_be = (_hb_build_matrix(sid, lookforward, 30, 30, tf=tf, exec_mode="grid_be")
+                           if with_be else None)
                 sig = data["signal"]
                 by_key = {(c["entry"], c["sl_index"]): c for c in data["cells"]}
+                by_key_be = ({(c["entry"], c["sl_index"]): c for c in data_be["cells"]}
+                             if data_be else {})
+                # T1M-страховка: матрица уже считает T1M сама (_hb_build_matrix),
+                # добор нужен только если ячейки реально нет (старый кеш, дыра M1),
+                # иначе пропускаем лишние загрузки свечей. T2/T3 всегда из матрицы.
+                _t1m_wanted = any(_hb_be_base_col(c).split("/")[0] == "T1M" for c in columns)
+                _t1m_missing = _t1m_wanted and (
+                    any(("T1M", _sl) not in by_key for _sl in (1, 2, 3))
+                    or (with_be and data_be is not None
+                        and any(("T1M", _sl) not in by_key_be for _sl in (1, 2, 3)))
+                )
+                if _t1m_missing:
+                    try:
+                        from level_tester.backtester.hourbounce import (
+                            config_for_tf as _t0_cfg_tf,
+                            grid_be_exec as _t0_gbe,
+                            grid_exec as _t0_ge,
+                            review_signal as _t0_rs,
+                            step_for_tf as _t0_step,
+                        )
+                        from level_tester.infrastructure.hourbounce_store import (
+                            load_candles_cached as _t0_lcc,
+                        )
+                        _sig_obj, _meta, _dtp, _st, _side, _ps = _hb_resolve_signal(sid)
+                        _cfg = _t0_cfg_tf(tf)
+                        _stp = _t0_step(tf)
+                        _start = _st - 30 * timedelta(minutes=_stp)
+                        _nn = datetime.now(UTC)
+                        _nf = _nn.replace(minute=(_nn.minute // _stp) * _stp, second=0, microsecond=0)
+                        _end = min(_st + lookforward * timedelta(minutes=_stp), _nf)
+                        _candles, _ = _t0_lcc(
+                            session_factory, binance_client, _sig_obj.symbol,
+                            _start, _end, refresh=False, tf=tf)
+                        try:
+                            _m1, _ = _t0_lcc(
+                                session_factory, binance_client, _sig_obj.symbol,
+                                _start, _end, refresh=False, tf="1m")
+                        except Exception:
+                            _m1 = None
+                        for _sl in (1, 2, 3):
+                            if ("T1M", _sl) not in by_key:
+                                _rx = _t0_rs(
+                                    side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
+                                    signal_time=_st, candles=_candles, entry_code="T1M",  # type: ignore[arg-type]
+                                    sl_index=_sl, config=_cfg, exec_params=_t0_ge(_sl, _cfg),
+                                    m1_candles=_m1)
+                                _jx = _hb_result_json(_rx, _side)
+                                _jx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
+                                by_key[("T1M", _sl)] = _jx
+                            if with_be and data_be is not None and ("T1M", _sl) not in by_key_be:
+                                _rbx = _t0_rs(
+                                    side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
+                                    signal_time=_st, candles=_candles, entry_code="T1M",  # type: ignore[arg-type]
+                                    sl_index=_sl, config=_cfg, exec_params=_t0_gbe(_sl, _cfg),
+                                    m1_candles=_m1)
+                                _jbx = _hb_result_json(_rbx, _side)
+                                _jbx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
+                                by_key_be[("T1M", _sl)] = _jbx
+                    except Exception as exc:  # noqa: BLE001 - T1M-добор не роняет строку отчёта
+                        logger.debug("hourbounce report T1M failed: %s", sid, exc_info=True)
                 cells = {}
                 row_total = 0.0
-                for col in HB_REPORT_COLS:
-                    t, s = col.split("/")
-                    cell = by_key.get((t, int(s[2:])))
+                for col in columns:
+                    t, s = _hb_be_base_col(col).split("/")
+                    by = by_key_be if HB_BE_SUFFIX in col else by_key
+                    cell = by.get((t, int(s[2:])))
                     pnl = _hb_cell_pnl(cell or {}, sig["side"]) if cell else 0.0
                     outcome = (cell or {}).get("outcome")
                     cells[col] = {"pnl": pnl, "outcome": outcome}
@@ -2027,8 +2193,8 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
                     d = round(pnl, 2)
                     footer[col] = round(footer[col] + d, 2)
                     row_total = round(row_total + pnl, 4)
-                best = max((cells[c]["pnl"] for c in HB_REPORT_COLS), default=0.0)
-                any_hit = any(cells[c]["pnl"] for c in HB_REPORT_COLS)
+                best = max((cells[c]["pnl"] for c in columns), default=0.0)
+                any_hit = any(cells[c]["pnl"] for c in columns)
                 footer_best = round(footer_best + (round(best, 2) if any_hit else 0.0), 2)
                 rows.append({
                     "signal_id": sid, "symbol": sig["symbol"], "side": sig["side"],
@@ -2042,16 +2208,19 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int) -> None
                 logger.debug("hourbounce report signal failed: %s", sid, exc_info=True)
                 rows.append({"signal_id": sid, "symbol": "?", "side": "?",
                              "level_price": None, "dt_place": None, "outcome_arch": None,
-                             "cells": {c: {"pnl": 0.0, "outcome": "ERROR"} for c in HB_REPORT_COLS},
+                             "cells": {c: {"pnl": 0.0, "outcome": "ERROR"} for c in columns},
                              "row_total": 0.0, "error": str(exc)[:200],
                              "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
                              "traded": bool(info.get("traded"))})
             job["done"] = i + 1
         # TOTAL стоит под колонкой "Лучший" -> сумма лучших PnL вниз по столбцу,
-        # а не сумма всех 9 клеток строки.
+        # а не сумма всех клеток строки. Лучший — по всем показанным колонкам.
         footer["TOTAL"] = footer_best
-        job["result"] = {"columns": HB_REPORT_COLS, "rows": rows, "footer": footer,
-                         "count": len(rows)}
+        from level_tester.backtester.hourbounce import GRID_BE_LOCK_PCT, GRID_BE_TRIGGER_PCT
+        job["result"] = {"columns": columns, "rows": rows, "footer": footer,
+                         "count": len(rows), "tf": tf, "with_be": with_be,
+                         "be_params": {"trigger_pct": str(GRID_BE_TRIGGER_PCT),
+                                       "lock_pct": str(GRID_BE_LOCK_PCT)} if with_be else None}
         job["status"] = "completed"
     except Exception as exc:  # noqa: BLE001 - граница фонового job
         job["status"] = "failed"

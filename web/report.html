@@ -50,7 +50,7 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <select id="f-side"><option value="">ALL</option><option>LONG</option><option>SHORT</option><option value="STOP_TAKE">STOP TAKE</option></select>
 <label style="font-size:11px;color:var(--dim)">с даты<br><input id="f-from" type="date" style="margin-top:2px"></label>
 <label style="font-size:11px;color:var(--dim)">по дату<br><input id="f-to" type="date" style="margin-top:2px"></label>
-<select id="f-limit"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select>
+<select id="f-limit" title="Сколько свежих сигналов взять (фильтр traded применяется на сервере до лимита)"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option><option value="1000">1000</option><option value="5000">все</option></select>
 <label class="chk"><input type="checkbox" id="f-traded"> только отторгованные в БД</label>
 <select id="f-group" title="Группировка строк">
 <option value="none">Без группировки</option>
@@ -59,13 +59,15 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <option value="week">По неделям</option>
 <option value="day">По дням</option>
 </select>
+<select id="f-tf" title="Таймфрейм свечей сетки"><option value="5m">M5</option><option value="1m">M1</option></select>
+<label class="chk" title="Добавить 9 колонок Grid+БУ: стоп в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
 <button class="primary" id="btn-run">Сформировать</button>
 <button class="secondary" id="btn-csv" disabled>Скачать CSV</button>
 </div>
 <div class="progress" id="prog"><div id="prog-fill" style="width:0%"></div></div>
 <div id="status">Загрузи список и нажми «Сформировать». Первый прогон тянет свечи с Binance, повторный — из кеша.</div>
 <div class="wrap" id="wrap" style="display:none"><table id="tbl"></table></div>
-<div class="hint">EXPIRED считается по последней цене (вход был, выхода нет). Наведи на клетку — увидишь исход (TAKE/STOP/NO_ENTRY/EXPIRED).</div>
+<div class="hint">EXPIRED считается по последней цене (вход был, выхода нет). Наведи на клетку — увидишь исход (TAKE/STOP/NO_ENTRY/EXPIRED). Базовые колонки — голый трейлинг 1%/1% без БУ; «+ Grid+БУ» — стоп в безубыток из конфига, трейлинг строго после БУ.</div>
 </main>
 <script>
 'use strict';
@@ -78,7 +80,8 @@ function saveSettings() {
     localStorage.setItem(LS_KEY, JSON.stringify({
       search: $('f-search').value, side: $('f-side').value, limit: $('f-limit').value,
       from: $('f-from').value, to: $('f-to').value,
-      traded: $('f-traded').checked, group: $('f-group').value,
+      traded: $('f-traded').checked, group: $('f-group').value, tf: $('f-tf').value,
+      be: $('f-be').checked,
     }));
   } catch (_) {}
 }
@@ -92,9 +95,11 @@ function loadSettings() {
     if (s.to) $('f-to').value = s.to;
     $('f-traded').checked = !!s.traded;
     if (s.group) $('f-group').value = s.group;
+    if (s.tf) $('f-tf').value = s.tf;
+    $('f-be').checked = !!s.be;
   } catch (_) {}
 }
-['f-search', 'f-side', 'f-limit', 'f-from', 'f-to', 'f-traded', 'f-group'].forEach((id) => {
+['f-search', 'f-side', 'f-limit', 'f-from', 'f-to', 'f-traded', 'f-group', 'f-tf', 'f-be'].forEach((id) => {
   $(id).addEventListener('change', saveSettings);
 });
 
@@ -116,19 +121,21 @@ $('btn-run').onclick = async () => {
     const q = new URLSearchParams({ search: $('f-search').value.trim(), side: stopTake ? '' : sideVal, limit: $('f-limit').value });
     if ($('f-from').value) q.set('date_from', $('f-from').value);
     if ($('f-to').value) q.set('date_to', $('f-to').value);
+    if ($('f-traded').checked) q.set('traded_only', 'true');  // серверный фильтр ДО лимита
     const s = await api('/api/hourbounce/signals?' + q.toString());
     let items = s.items || [];
     if (stopTake) items = items.filter((x) => ['STOP', 'TAKE'].includes(String(x.outcome_arch || '').toUpperCase()));
-    if ($('f-traded').checked) items = items.filter((x) => x.status && String(x.status).startsWith('closed_'));
     const id2arch = {};
     items.forEach((x) => { id2arch[x.signal_id] = x; });
     const ids = items.map((x) => x.signal_id);
     if (!ids.length) { $('status').textContent = 'Нет сигналов под фильтром.'; return; }
     $('status').textContent = `Сигналов: ${ids.length}. Старт расчёта...`;
     $('prog').classList.add('on');
+    const tf = $('f-tf').value === '1m' ? '1m' : '5m';
+    const withBe = $('f-be').checked;
     const { job_id } = await api('/api/hourbounce/report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signal_ids: ids, lookforward: 2000 }),
+      body: JSON.stringify({ signal_ids: ids, lookforward: tf === '1m' ? 10000 : 2000, tf, with_be: withBe }),
     });
     for (;;) {
       await new Promise((r) => setTimeout(r, 1000));
@@ -149,7 +156,8 @@ $('btn-run').onclick = async () => {
     renderTable(data, $('f-group').value);
     $('btn-csv').disabled = false;
     const nTr = data.rows.filter((r) => r.traded).length;
-    $('status').textContent = `Готово: ${data.count} сигналов (из них отторговано в БД: ${nTr}). Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
+    const beTxt = data.with_be && data.be_params ? ` · Grid+БУ ${data.be_params.trigger_pct}/${data.be_params.lock_pct}` : '';
+    $('status').textContent = `Готово [${(data.tf || tf).toUpperCase()}${beTxt}]: ${data.count} сигналов (из них отторговано в БД: ${nTr}). Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
   } catch (e) {
     $('status').textContent = 'Ошибка: ' + e.message;
   } finally {

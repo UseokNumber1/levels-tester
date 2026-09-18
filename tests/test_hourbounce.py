@@ -2,7 +2,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from level_tester.backtester.hourbounce import HourBounceConfig, review_signal
+from level_tester.backtester.hourbounce import HourBounceConfig, config_for_tf, review_signal
 from level_tester.domain.models import Candle
 
 BASE = datetime(2026, 8, 10, 8, 0, tzinfo=UTC)
@@ -33,6 +33,22 @@ def test_no_touch():
     r = review_signal(side="BUY", level_price=Decimal("100"), signal_time=BASE,
                       candles=cs, entry_code="T1", sl_index=1)
     assert r.outcome == "NO_ENTRY" and r.reason == "no_touch"
+
+
+def test_confirm_window_is_time_based_across_tf():
+    # касание на i=0, единственное подтверждение на баре 50 (~50 мин спустя):
+    # в окно M1 (100 бар = 100 мин) попадает, в окно M5 (20 бар = 100 мин,
+    # но 50 бар M5 = 250 мин) — нет при том же числе баров; здесь бары
+    # одинаковые, поэтому M5-окно 20 его не видит, а M1-окно 100 видит.
+    px = [Decimal("99.5")] * 50 + [Decimal("100.5")] + [Decimal("100.5")] * 9
+    opens = [Decimal("101")] + [Decimal("99.5")] * 49 + [Decimal("99.8")] + [Decimal("100.5")] * 9
+    cs = mk(px=px, opens=opens)
+    r1 = review_signal(side="BUY", level_price=Decimal("100"), signal_time=BASE,
+                       candles=cs, entry_code="T2", sl_index=1, config=config_for_tf("1m"))
+    assert r1.entry_dt is not None and r1.reason != "no_confirm"
+    r5 = review_signal(side="BUY", level_price=Decimal("100"), signal_time=BASE,
+                       candles=cs, entry_code="T2", sl_index=1, config=config_for_tf("5m"))
+    assert r5.outcome == "NO_ENTRY" and r5.reason == "no_confirm"
 
 
 def test_touch_candle_close_not_counted_as_confirm():
@@ -490,3 +506,264 @@ def test_deterministic_replay():
     a = review_signal(**kw)
     b = review_signal(**kw)
     assert (a.outcome, a.entry_price, a.exit_price) == (b.outcome, b.entry_price, b.exit_price)
+
+
+def test_grid_be_exec_params_from_config():
+    from level_tester.backtester.hourbounce import (
+        GRID_BE_LOCK_PCT,
+        GRID_BE_TRIGGER_PCT,
+        grid_be_exec,
+    )
+    assert (GRID_BE_TRIGGER_PCT, GRID_BE_LOCK_PCT) == (Decimal("0.9"), Decimal("0.35"))
+    ex = grid_be_exec(2)
+    assert ex.sl_pct == Decimal("1.0")
+    assert ex.be_trigger_pct == Decimal("0.9") and ex.be_lock_pct == Decimal("0.35")
+    assert ex.use_be and ex.use_trail
+    assert ex.trail_activation_pct == Decimal("1.0") and ex.trail_distance_pct == Decimal("1.0")
+
+
+def test_grid_be_moves_stop_same_candle_trail_next():
+    # Grid+БУ LONG: свеча 1 бьёт БУ-триггер 0.9% (стоп -> 100.35 в той же свече),
+    # но трейлинг в той же свече заблокирован гейтом; свеча 2 бьёт активацию
+    # 1.0% -> trail_on. Порядок как в проде PGv2.
+    from level_tester.backtester.hourbounce import grid_be_exec
+    cs = mk(
+        px=[Decimal("100.2"), Decimal("100.6"), Decimal("101.0"), Decimal("101.0")],
+        opens=[Decimal("100.5"), Decimal("100.4"), Decimal("100.5"), Decimal("101.0")],
+        lows=[Decimal("99.9"), Decimal("100.38"), Decimal("100.5"), Decimal("100.9")],
+        highs=[Decimal("100.6"), Decimal("100.95"), Decimal("101.2"), Decimal("101.1")],
+    )
+    ex = grid_be_exec(1)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex)
+    be = [e for e in r.events if e.type == "breakeven"]
+    tr = [e for e in r.events if e.type == "trail_on"]
+    assert len(be) == 1 and be[0].dt == cs[1].close_time
+    assert r.be_price == Decimal("100.35")
+    assert len(tr) == 1 and tr[0].dt == cs[2].close_time
+    assert r.outcome == "EXPIRED"  # стоп 100.35 и trail 100.188 не задеты
+
+
+def test_review_matrix_grid_be_has_nine_cells_with_be():
+    from level_tester.backtester.hourbounce import review_matrix
+    cs = mk(
+        px=[Decimal("100.2"), Decimal("100.5"), Decimal("101.0"), Decimal("101.0")],
+        opens=[Decimal("101"), Decimal("100.2"), Decimal("100.5"), Decimal("101.0")],
+        lows=[Decimal("99.9"), Decimal("100.2"), Decimal("100.5"), Decimal("100.9")],
+        highs=[Decimal("101.1"), Decimal("100.95"), Decimal("101.2"), Decimal("101.1")],
+    )
+    m1s = mk1([
+        (101.0, 101.1, 99.9, 100.2),
+        (100.2, 100.6, 100.1, 100.5),
+        (100.5, 101.0, 100.4, 100.9),
+        (100.9, 101.2, 100.8, 101.1),
+        (101.1, 101.3, 101.0, 101.2),
+    ])
+    kw = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE, candles=cs)
+    plain = review_matrix(**kw, exec_mode="grid", m1_candles=m1s)
+    be = review_matrix(**kw, exec_mode="grid_be", m1_candles=m1s)
+    assert len(plain) == len(be) == 9
+    assert {r.entry_code for r in plain} == {"T1M", "T2", "T3"}
+    assert not any(e.type == "breakeven" for r in plain for e in r.events)
+    t1m = [r for r in plain if r.entry_code == "T1M"]
+    assert all(r.outcome != "NO_ENTRY" for r in t1m)
+    t1m_be = next(r for r in be if r.entry_code == "T1M" and r.sl_index == 1)
+    assert any(e.type == "breakeven" for e in t1m_be.events)
+
+
+def test_review_matrix_t1m_without_m1_is_no_entry():
+    from level_tester.backtester.hourbounce import review_matrix
+    cs = mk(
+        px=[Decimal("100.2"), Decimal("100.5"), Decimal("100.6")],
+        opens=[Decimal("101"), Decimal("100.2"), Decimal("100.5")],
+        lows=[Decimal("99.9"), Decimal("100.2"), Decimal("100.4")],
+        highs=[Decimal("101.1"), Decimal("100.95"), Decimal("100.8")],
+    )
+    res = review_matrix(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                        candles=cs, exec_mode="grid")
+    t1m = [r for r in res if r.entry_code == "T1M"]
+    assert len(t1m) == 3
+    assert all(r.outcome == "NO_ENTRY" and r.reason == "no_m1" for r in t1m)
+    # T2/T3 на M5 при этом считаются как раньше
+    assert any(r.outcome != "NO_ENTRY" for r in res if r.entry_code == "T2")
+
+
+def mk1(rows, t0=BASE):
+    """Минутные свечи: rows = [(open, high, low, close), ...]."""
+    return [
+        Candle(
+            t0 + i * timedelta(minutes=1), t0 + (i + 1) * timedelta(minutes=1),
+            Decimal(str(o)), Decimal(str(h)), Decimal(str(lo)), Decimal(str(c)),
+            Decimal("1"), "1m", True,
+        )
+        for i, (o, h, lo, c) in enumerate(rows)
+    ]
+
+
+def agg5(m1s):
+    """Собрать M5 из кратных 5 M1."""
+    out = []
+    for g in range(0, len(m1s), 5):
+        part = m1s[g:g + 5]
+        out.append(Candle(
+            part[0].open_time, part[-1].close_time,
+            part[0].open, max(c.high for c in part),
+            min(c.low for c in part), part[-1].close,
+            Decimal("5"), "5m", True,
+        ))
+    return out
+
+
+def test_t1m_basic_market_on_touch():
+    # касание 100 на минуте 2 (low 99.9), вход по принту = level, исполнение на M1
+    m1s = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.5, 100.6, 100.3, 100.4),
+        (100.4, 100.5, 99.9, 100.1),
+        (100.1, 101.2, 100.0, 101.0),
+        (101.0, 101.5, 100.9, 101.4),
+        (101.4, 101.8, 101.3, 101.7),
+    ])
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=agg5(m1s + mk1([
+                          (101.7, 101.9, 101.6, 101.8),
+                          (101.8, 102.0, 101.7, 101.9),
+                          (101.9, 102.1, 101.8, 102.0),
+                          (102.0, 102.2, 101.9, 102.1),
+                      ], t0=BASE + timedelta(minutes=6))),
+                      entry_code="T1M", sl_index=1, m1_candles=m1s)
+    assert r.entry_code == "T1M"
+    assert r.entry_price == Decimal("100")
+    assert r.entry_dt == BASE + timedelta(minutes=2)
+    assert r.touch_dt == BASE + timedelta(minutes=2)
+    assert r.outcome in ("TAKE", "STOP", "EXPIRED")
+
+
+def test_t1m_gap_entry_at_open():
+    # минута открылась сразу под уровнем (гэп): маркет исполняется по open
+    m1s = mk1([
+        (99.5, 99.6, 99.4, 99.5),
+        (99.5, 99.7, 99.3, 99.6),
+    ])
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=agg5(m1s + mk1([
+                          (99.6, 99.8, 99.5, 99.7),
+                          (99.7, 99.9, 99.6, 99.8),
+                          (99.8, 100.0, 99.7, 99.9),
+                      ], t0=BASE + timedelta(minutes=2))),
+                      entry_code="T1M", sl_index=1, m1_candles=m1s)
+    assert r.entry_price == Decimal("99.5")
+    assert r.entry_dt == BASE
+
+
+def test_t1x_no_m1():
+    m5 = mk(px=[Decimal("100.5")], opens=[Decimal("101")], lows=[Decimal("99.9")])
+    for code in ("T1M", "T1L"):
+        r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                          candles=m5, entry_code=code, sl_index=1)
+        assert r.outcome == "NO_ENTRY" and r.reason == "no_m1"
+
+
+def test_t1m_slippage_against_trader():
+    m1s = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.4, 100.5, 99.9, 100.1),
+        (100.1, 100.4, 100.0, 100.3),
+        (100.3, 100.5, 100.2, 100.4),
+        (100.4, 100.6, 100.3, 100.5),
+    ])
+    kw = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+              candles=agg5(m1s), entry_code="T1M", sl_index=1, m1_candles=m1s)
+    base = review_signal(**kw)
+    slip = review_signal(**kw, slippage_pct=Decimal("0.1"))
+    assert base.entry_price == Decimal("100")
+    assert slip.entry_price == Decimal("100") * Decimal("1.001")
+    assert slip.entry_price > base.entry_price
+
+
+def test_t1l_clips_pretouch_spike():
+    # спайк 101.5 до касания: T1 берёт фантомный trail, T1L — только post-touch
+    m1s = mk1([
+        (100.5, 101.5, 100.4, 101.3),
+        (101.3, 101.4, 100.8, 100.9),
+        (100.9, 101.0, 99.9, 100.0),
+        (100.0, 100.3, 99.95, 100.2),
+        (100.2, 100.4, 100.0, 100.3),
+        (100.3, 101.0, 100.2, 100.9),
+        (100.9, 101.6, 100.8, 101.5),
+        (101.5, 102.2, 101.4, 102.0),
+        (102.0, 102.5, 101.9, 102.3),
+        (102.3, 102.6, 102.2, 102.5),
+    ])
+    m5 = agg5(m1s)
+    kw = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE, candles=m5, sl_index=1)
+    t1 = review_signal(**kw, entry_code="T1")
+    t1l = review_signal(**kw, entry_code="T1L", m1_candles=m1s)
+    assert t1l.entry_code == "T1L"
+    assert t1l.entry_price == Decimal("100")
+    # T1 активировался от дотрогательного спайка, T1L — нет
+    assert t1.exit_price != t1l.exit_price
+
+
+def test_t1l_fills_on_touch_print():
+    # условие: лимитка уже стоит и заливается сразу в касание — вход всегда
+    # по level, даже если уровень пройден между минутами без возврата
+    m1s = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.5, 100.5, 99.0, 99.1),  # пролив через уровень — заливка в касание
+        (99.1, 99.2, 98.9, 99.0),
+        (99.0, 99.1, 98.8, 98.9),
+        (98.9, 99.0, 98.7, 98.8),
+    ])
+    m5 = agg5(m1s)
+    kw = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE, candles=m5, sl_index=1)
+    t1l = review_signal(**kw, entry_code="T1L", m1_candles=m1s)
+    assert t1l.outcome != "NO_ENTRY" and t1l.entry_price == Decimal("100")
+
+    # гэп между минутами через уровень без возврата: касание было (принт 100
+    # между закрытием минуты 0 и открытием минуты 1) — заливка по принту = level
+    m1s2 = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (99.5, 99.6, 99.4, 99.5),  # открылись под уровнем, весь диапазон ниже
+        (99.5, 99.7, 99.3, 99.6),
+        (99.6, 99.7, 99.4, 99.5),
+        (99.5, 99.6, 99.2, 99.3),
+    ])
+    m5b = agg5(m1s2)
+    kw2 = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE, candles=m5b, sl_index=1)
+    t1l2 = review_signal(**kw2, entry_code="T1L", m1_candles=m1s2)
+    assert t1l2.outcome != "NO_ENTRY" and t1l2.entry_price == Decimal("100")
+
+
+def test_t1l_no_m1_touch_on_data_hole():
+    # M5 касается, а в M1-ряде касания нет (дыра в данных) — строгий NO_ENTRY
+    m1s = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.5, 100.6, 100.4, 100.5),
+        (100.6, 100.7, 100.5, 100.6),
+        (100.6, 100.7, 100.5, 100.6),
+        (100.7, 100.8, 100.6, 100.7),
+    ])
+    m5 = agg5(m1s)
+    # вручную опускаем low M5-касания ниже уровня: M1 касания нет, M5 — есть
+    from dataclasses import replace as _replace
+    touched = _replace(m5[0], low=Decimal("99.9"))
+    m5h = [touched, *m5[1:]] if len(m5) > 1 else [touched]
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=m5h, entry_code="T1L", sl_index=1, m1_candles=m1s)
+    assert r.outcome == "NO_ENTRY" and r.reason == "no_m1_touch"
+
+
+def test_t1l_limit_fill_on_return():
+    # минута целиком под уровнем (без заливки), позже возврат к уровню -> вход по level
+    m1s = mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.5, 100.6, 100.2, 100.3),
+        (99.8, 99.9, 99.5, 99.6),     # целиком под уровнем — не заливка
+        (99.6, 100.2, 99.5, 100.1),   # возврат к уровню — заливка здесь
+        (100.1, 100.5, 100.0, 100.4),
+    ])
+    m5 = agg5(m1s)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=m5, entry_code="T1L", sl_index=1, m1_candles=m1s)
+    assert r.outcome != "NO_ENTRY" and r.entry_price == Decimal("100")

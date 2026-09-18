@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.3.0 (2026-09-18)
+
+### Fixed
+- **Ложные NO_ENTRY у T1M в отчётах** (`src/level_tester/infrastructure/hourbounce_store.py`, `src/level_tester/api/app.py`): две compounded-причины — (1) догрузка дыр M1 из Binance шла без ретраев и под rate-limit массовых прогонов молча оставляла дыры в кеше; добавлены 3 попытки с backoff + warning при неустранимой дыре; (2) валидность `hb_reviews` привязана только к M5-окну, поэтому T1M, однажды посчитанный на дырявых M1, отдавался из кеша вечно — теперь ячейки T1M всегда пересчитываются свежо поверх кеша (T2/T3 по-прежнему из кеша). Проверено на `ZECUSDT closed_sl`: было `NO_ENTRY`, стало `STOP` без `refresh`
+- **Отчёт без фильтра дат показывал только сентябрь** (`src/level_tester/api/app.py`, `web/report.html`): `f-limit=100` резал 100 свежих до клиентского фильтра «только отторгованные» — старые traded не попадали никогда; добавлен серверный `traded_only` в `/api/hourbounce/signals` (применяется до лимита и сортировки среза), чекбокс шлёт его на сервер; потолки подняты (`reader.read` 500→5000, API `le=5000`, `HbReportRequest` до 5000, в UI добавлены 1000/«все»). Проверка: `traded_only` возвращает все 102 отторгованные за 07.06–15.09 вместо 14 за 07–15.09
+
+### Changed
+- **Матрица T1 → T1M** (`src/level_tester/backtester/hourbounce.py`, `src/level_tester/api/app.py`, `web/hourbounce.html`, `web/hourbounce.js`, `scripts/validate_vs_archive.py`): ячейки касания в матрице 9 шт теперь считаются маркетом на касании по M1 (вход по принту = level, при гэпе — по open минуты, поиск и исполнение полностью на M1) вместо входа по level на M5 с внутрибарным lookahead; `review_matrix` принимает `m1_candles` (без них T1M даёт `NO_ENTRY/no_m1`), `_hb_build_matrix` догружает M1-ряд того же окна, старый кеш `hb_reviews` с T1 инвалидируется по составу входов, `/review` по умолчанию `entry=T1M`, real-trade маппинг `confirmation_bars_required` 0 → `T1M` (ближайший по смыслу к req=0)
+
 ## v1.2.2 (2026-09-11)
 
 ### Added

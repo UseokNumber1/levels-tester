@@ -64,7 +64,7 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <body>
 <header>
 <h1>HourBounce Review Lite <span id="app-version" style="color:#f7c948;font-size:13px;font-weight:600"></span></h1>
-<span class="sub" id="head-sub">архив PGv2 · M5 · T1/T2/T3 × SL 0.5/1.0/1.5</span>
+<span class="sub" id="head-sub">архив PGv2 · M5 · T1M/T2/T3 × SL 0.5/1.0/1.5</span>
 <span style="margin-left:auto"></span>
 <a href="/report" style="color:#8ec0ff;font-size:12px;margin-right:10px">→ PnL-отчёт</a><a href="/backtest" style="color:#8ec0ff;font-size:12px">→ Backtester</a></header>
 <div class="layout">
@@ -90,13 +90,16 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <main>
 <div class="tabs">
 <div class="grp" id="tabs-entry">
-<button data-e="T1" class="on">T1 · касание</button><button data-e="T2">T2 · 1 бар</button><button data-e="T3">T3 · 2 бара</button>
+<button data-e="T1M" class="on">T1M · маркет M1</button><button data-e="T2">T2 · 1 бар</button><button data-e="T3">T3 · 2 бара</button>
 </div>
 <div class="grp" id="tabs-sl">
 <button data-s="1">SL1 0.5%</button><button data-s="2">SL2 1.0%</button><button data-s="3" class="on">SL3 1.5%</button>
 </div>
 <div class="grp" id="tabs-exec">
 <button data-x="grid" class="on">Сетка SL</button><button data-x="signal">Сделка PG 1:1</button>
+</div>
+<div class="grp" id="tabs-tf">
+<button data-tf="5m" class="on">M5</button><button data-tf="1m">M1</button>
 </div>
 <span id="exec-line" style="color:var(--dim);font-size:11px;font-family:ui-monospace,monospace"></span>
 <span class="badge b-noentry" id="res-badge">—</span>
@@ -118,6 +121,6 @@ table.ev th{background:var(--panel2);color:var(--dim);text-align:left;padding:6p
 <div class="legend"><span><i class="sw" style="background:#ff9f43"></i>H1 уровень</span><span><i class="sw" style="background:#ef5350"></i>SL</span><span><i class="sw" style="background:#26a69a"></i>trail</span><span><i class="sw" style="background:#2962ff"></i>confirm</span><span><i class="sw" style="background:#f7c948"></i>★ real — ячейка реальной сделки PGv2</span><span>① касание · ② C1/C2 подтверждение (только подряд) · ③ вход · ④ трейлинг · время UTC</span></div>
 </main>
 </div>
-<script src="/static/hourbounce.js?v=6"></script>
+<script src="/static/hourbounce.js?v=7"></script>
 </body>
 </html>

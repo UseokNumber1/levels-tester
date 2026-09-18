@@ -2,11 +2,17 @@
 /* HourBounce Review Lite: слева список архивных сигналов, справа один M5 график + табы T/SL */
 const $ = (id) => document.getElementById(id);
 const state = {
-  signals: [], sel: null, entry: 'T1', sl: 3, mode: 'matrix', forceRefresh: false,
-  execMode: 'grid',
+  signals: [], sel: null, entry: 'T1M', sl: 3, mode: 'matrix', forceRefresh: false,
+  execMode: 'grid', tf: localStorage.getItem('hb-tf') === '1m' ? '1m' : '5m',
   chart: null, series: null, markers: null, trailSeries: null,
   priceLines: [], mcharts: [], centerRange: null,
 };
+
+// Окна — по времени: M5-значения в барах умножаются на 5 для M1.
+function tfScale() { return state.tf === '1m' ? 5 : 1; }
+function tfLabel() { return state.tf === '1m' ? 'M1' : 'M5'; }
+function ctxBars(base) { return base * tfScale(); }
+function lookforwardBars(base) { return base * tfScale(); }
 
 async function api(url) {
   const r = await fetch(url);
@@ -186,6 +192,24 @@ function setTabs() {
     b.classList.toggle('on', Number(b.dataset.s) === state.sl);
     b.onclick = () => { state.sl = Number(b.dataset.s); setTabs(); loadReview(); };
   });
+  document.querySelectorAll('#tabs-tf button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.tf === state.tf);
+    b.onclick = () => {
+      if (state.tf === b.dataset.tf) return;
+      state.tf = b.dataset.tf;
+      localStorage.setItem('hb-tf', state.tf);
+      setTabs();
+      updateTfLabels();
+      if (state.mode === 'matrix') loadMatrix();
+      else loadReview();
+    };
+  });
+}
+
+function updateTfLabels() {
+  const lbl = tfLabel();
+  const hs = $('head-sub');
+  if (hs) hs.textContent = `архив PGv2 · ${lbl} · T1M/T2/T3 × SL 0.5/1.0/1.5`;
 }
 
 function ensureChart() {
@@ -248,7 +272,7 @@ async function loadReview() {
   state.forceRefresh = false;
   let d;
   try {
-    d = await api(`/api/hourbounce/review?signal_id=${encodeURIComponent(s.signal_id)}&entry=${state.entry}&sl=${state.sl}&mode=${state.execMode}&pre=51&post=51${rf}`);
+    d = await api(`/api/hourbounce/review?signal_id=${encodeURIComponent(s.signal_id)}&entry=${state.entry}&sl=${state.sl}&mode=${state.execMode}&pre=${ctxBars(51)}&post=${ctxBars(51)}&lookforward=${lookforwardBars(2000)}&tf=${state.tf}${rf}`);
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
@@ -310,7 +334,7 @@ function renderReview(d) {
   $('res-badge').className = 'badge ' + ({ TAKE: 'b-take', STOP: 'b-stop', NO_ENTRY: 'b-noentry', EXPIRED: 'b-expired' }[result.outcome] || 'b-noentry');
   $('res-badge').textContent = result.outcome + (result.ambiguous ? ' ~' : '') + (result.reason ? ` (${result.reason})` : '');
   const rPnl = cellPnlPct(result, signal.side);
-  $('res-line').textContent = `${signal.symbol} · ${signal.side} · ${state.entry}/SL${params.sl_index} · вход ${fmtP(result.entry_price, signal)} · выход ${fmtP(result.exit_price, signal)} · PnL ${fmtPnlSigned(rPnl)} · R ${result.r_multiple || '—'} · touch наш ${shortDt(result.touch_dt)} · PGv2 ${shortDt(signal.touch_ref)}${d.cache && d.cache.cells_hit ? ' · из кеша' : ''}`;
+  $('res-line').textContent = `${signal.symbol} · ${signal.side} · ${tfLabel()} · ${state.entry}/SL${params.sl_index} · вход ${fmtP(result.entry_price, signal)} · выход ${fmtP(result.exit_price, signal)} · PnL ${fmtPnlSigned(rPnl)} · R ${result.r_multiple || '—'} · touch наш ${shortDt(result.touch_dt)} · PGv2 ${shortDt(signal.touch_ref)}${d.cache && d.cache.cells_hit ? ' · из кеша' : ''}`;
   const bn = $('banner');
   if (result.mode === 'placement') {
     bn.innerHTML = `С момента выставления уровня (<b>${signal.dt_place} UTC</b>) касания не было — ситуация не отработала во всей загруженной истории. ` +
@@ -321,7 +345,7 @@ function renderReview(d) {
   }
   $('head-sub').textContent = `сигнал ${signal.symbol} ${signal.signal_id} · level ${signal.level_price} · ${signal.side} · арх. ${state.sel.outcome_arch}`;
 
-  const hasC = state.entry === 'T1' ? null : (result.confirm_dt || []).length > 0;
+  const hasC = (result.confirm_dt || []).length > 0;
   const s4 = result.outcome === 'TAKE' ? 'ok-take' : result.outcome === 'STOP' ? 'ok-stop' : 'on';
   const s4label = result.outcome === 'TAKE' ? (result.exit_kind === 'tp' ? 'TP' : 'trail') : result.outcome === 'STOP' ? 'SL' : result.outcome;
   $('stepper').innerHTML = `
@@ -370,7 +394,7 @@ $('m-single').onclick = () => setMode('single');
 $('m-matrix').onclick = () => setMode('matrix');
 $('m-export').onclick = () => {
   if (!state.sel) return;
-  window.open('/api/hourbounce/export?signal_id=' + encodeURIComponent(state.sel.signal_id), '_blank');
+  window.open('/api/hourbounce/export?signal_id=' + encodeURIComponent(state.sel.signal_id) + `&lookforward=${lookforwardBars(2000)}&tf=${state.tf}`, '_blank');
 };
 $('m-refresh').onclick = () => {
   if (!state.sel) return;
@@ -414,7 +438,7 @@ async function loadMatrix() {
   state.forceRefresh = false;
   let d;
   try {
-    d = await api(`/api/hourbounce/matrix?signal_id=${encodeURIComponent(s.signal_id)}&pre=51&post=51${rf}`);
+    d = await api(`/api/hourbounce/matrix?signal_id=${encodeURIComponent(s.signal_id)}&pre=${ctxBars(51)}&post=${ctxBars(51)}&lookforward=${lookforwardBars(2000)}&tf=${state.tf}${rf}`);
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
@@ -455,7 +479,7 @@ async function loadMatrix() {
     <span>${d.cache && d.cache.cells_hit ? 'из кеша' : 'посчитано'} · свечей из кеша <b>${(d.cache && d.cache.candles_cached) ?? '—'}</b></span>
     <span>окно: от выставления до ближайшей отработки · всё время UTC</span>`;
   $('res-badge').textContent = `${counts.TAKE}T / ${counts.STOP}S / ${counts.NO_ENTRY}NE`;
-  $('res-line').textContent = `${s.symbol} · ${s.side} · level ${s.level_price} · M5 · 9 комбинаций · touch PGv2 ${shortDt(d.signal.touch_ref)}`;
+  $('res-line').textContent = `${s.symbol} · ${s.side} · level ${s.level_price} · ${tfLabel()} · 9 комбинаций · touch PGv2 ${shortDt(d.signal.touch_ref)}`;
 
   box.appendChild(document.createElement('div'));
   const slSizes = d.sl_sizes || ['0.5', '1.0', '1.5'];
@@ -465,9 +489,9 @@ async function loadMatrix() {
     el.textContent = `SL${sl} · ${slSizes[sl - 1]}%`;
     box.appendChild(el);
   });
-  const labels = { T1: 'T1 · касание', T2: 'T2 · 1 бар', T3: 'T3 · 2 бара' };
+  const labels = { T1M: 'T1M · маркет M1', T2: 'T2 · 1 бар', T3: 'T3 · 2 бара' };
   let syncing = false;
-  ['T1', 'T2', 'T3'].forEach((code) => {
+  ['T1M', 'T2', 'T3'].forEach((code) => {
     const rh = document.createElement('div');
     rh.className = 'rowh';
     rh.textContent = labels[code];
@@ -481,7 +505,7 @@ async function loadMatrix() {
       if (isReal) card.title = `Реальная сделка PGv2: ${real.entry}·SL${real.sl_index}, арх. PnL ${fmtPnlSigned(real.pnl_pct_arch)}`;
       const cls = { TAKE: 'b-take', STOP: 'b-stop', NO_ENTRY: 'b-noentry', EXPIRED: 'b-expired' }[cell.outcome];
       const cp = cellPnlPct(cell, (d.signal && d.signal.side) || s.side);
-      card.innerHTML = `<div class="mhead"><span>T${code[1]}·SL${sl} · M5${isReal ? ' <span class="real-tag">★ real</span>' : ''}</span><span class="badge ${cls}">${cell.outcome}</span></div><div class="mchart"></div><div class="mfoot">in ${cell.entry_price || '—'} · out ${cell.exit_price || '—'} · R ${cell.r_multiple || '—'} · <span class="${pnlClass(cp)}">PnL ${fmtPnlSigned(cp)}</span></div>`;
+      card.innerHTML = `<div class="mhead"><span>${code}·SL${sl} · ${tfLabel()}${isReal ? ' <span class="real-tag">★ real</span>' : ''}</span><span class="badge ${cls}">${cell.outcome}</span></div><div class="mchart"></div><div class="mfoot">in ${cell.entry_price || '—'} · out ${cell.exit_price || '—'} · R ${cell.r_multiple || '—'} · <span class="${pnlClass(cp)}">PnL ${fmtPnlSigned(cp)}</span></div>`;
       box.appendChild(card);
       const chartDiv = card.querySelector('.mchart');
       const chart = LightweightCharts.createChart(chartDiv, {
@@ -530,6 +554,7 @@ async function loadMatrix() {
 
 setTabs();
 setExecTabs();
+updateTfLabels();
 setMode('matrix');
 loadSignals();
 fetch('/api/version').then((r) => r.json()).then((d) => {

@@ -76,3 +76,10 @@ market:
   exchange: binance
   market_type: usdt_m_futures
   quote_asset: USDT
+
+hourbounce:
+  # Сетка Grid+БУ для PnL-отчёта: перевод стопа в безубыток по триггеру,
+  # трейлинг 1%/1% включается строго после БУ (порядок как в проде PGv2).
+  # Требуется перезапуск сервера после правок.
+  grid_be_trigger_pct: 0.9
+  grid_be_lock_pct: 0.35
