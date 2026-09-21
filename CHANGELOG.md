@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.3.2 (2026-09-21)
+
+### Fixed
+- **TREEUSDT price display precision** (`src/level_tester/api/app.py`, `web/hourbounce.js`): HourBounce now derives display precision from `tick_size` (5 for TREEUSDT) instead of exchange `price_precision` (7). Previously the chart y-axis showed spurious `0.0000006` labels instead of `0.0476`. Added batch price spec lookup (`_hb_price_specs`) for signal list — single catalog query instead of N sessions. Frontend `calcFitRange` skips PGv2 zero placeholders (`"0.0000000"`), and race guards (`reviewSeq`/`matrixSeq`/`signalsSeq`) prevent stale responses from overwriting the chart.
+
+### Added
+- **Shared-DB-first candle loading** (`src/level_tester/backtester/candle_loader.py`): `CandleLoader` now reads from the shared `candles` table via `application.candle_service.get_candles` when a session factory is available (via explicit arg or `DATABASE_URL`), falling back to direct Binance API on any DB failure.
+- **HourBounce frontend race guards** (`web/hourbounce.js`): `reviewSeq`, `matrixSeq`, `signalsSeq` sequence counters invalidate stale async responses when signal/tab/mode/execMode changes. Metadata (`price_precision`, `tick_size`) from API responses now propagates to `state.sel` for correct price formatting.
+
+### Changed
+- **HourBounce price spec logic** (`src/level_tester/api/app.py`): `_hb_price_spec` and new `_hb_price_specs` use `price_precision_from_tick(tick_size)` for display precision, matching replay engine behavior. Fallback derives precision from entry price decimal digits.
+
+### Tests
+- Added 3 regression tests in `tests/test_api.py`:
+  - `test_hb_price_spec_uses_tick_size_not_exchange_precision` — TREEUSDT case
+  - `test_hb_price_spec_falls_back_to_price_digits` — unknown symbol fallback
+  - `test_hb_price_specs_batch_one_query_and_fallback` — batch query + fallback
+
 ## v1.3.1 (2026-09-18)
 
 ### Added

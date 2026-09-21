@@ -1,9 +1,74 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import sleep
 
 from fastapi.testclient import TestClient
 
-from level_tester.api.app import app
+from level_tester.api import app as app_module
+from level_tester.api.app import _hb_price_spec, _hb_price_specs, app
+from level_tester.infrastructure.database import (
+    InstrumentRow,
+    create_session_factory,
+    ensure_schema,
+)
+
+
+def _catalog_with(symbol: str, tick_size: str, price_precision: int | None = None):
+    factory = create_session_factory("sqlite://")
+    ensure_schema(factory)
+    with factory() as session:
+        session.add(
+            InstrumentRow(
+                symbol=symbol,
+                exchange="binance",
+                market_type="usdt_m_futures",
+                quote_asset="USDT",
+                tick_size=Decimal(tick_size),
+                price_precision=price_precision,
+            )
+        )
+        session.commit()
+    return factory
+
+
+def test_hb_price_spec_uses_tick_size_not_exchange_precision() -> None:
+    """TREEUSDT: Binance pricePrecision=7, tickSize=0.00001 -> отображаем 5 знаков.
+
+    Иначе шкала рисуется с лишними нулями и сдвигается к 0.0000006 вместо 0.0476.
+    """
+    factory = _catalog_with("TREEUSDT", "0.0000100000000000", price_precision=7)
+    original = app_module.session_factory
+    app_module.session_factory = factory
+    try:
+        spec = _hb_price_spec("TREEUSDT", "0.0476")
+    finally:
+        app_module.session_factory = original
+    assert spec == {"price_precision": 5, "tick_size": "0.0000100000000000"}
+
+
+def test_hb_price_spec_falls_back_to_price_digits() -> None:
+    factory = create_session_factory("sqlite://")
+    ensure_schema(factory)
+    original = app_module.session_factory
+    app_module.session_factory = factory
+    try:
+        spec = _hb_price_spec("UNKNOWNUSDT", "0.0476")
+    finally:
+        app_module.session_factory = original
+    assert spec["price_precision"] == 4
+    assert spec["tick_size"] is None
+
+
+def test_hb_price_specs_batch_one_query_and_fallback() -> None:
+    factory = _catalog_with("TREEUSDT", "0.0000100000000000", price_precision=7)
+    original = app_module.session_factory
+    app_module.session_factory = factory
+    try:
+        specs = _hb_price_specs({"TREEUSDT", "UNKNOWNUSDT"}, {"UNKNOWNUSDT": "0.0476"})
+    finally:
+        app_module.session_factory = original
+    assert specs["TREEUSDT"] == {"price_precision": 5, "tick_size": "0.0000100000000000"}
+    assert specs["UNKNOWNUSDT"] == {"price_precision": 4, "tick_size": None}
 
 
 def test_run_commands_and_snapshot() -> None:

@@ -6,6 +6,8 @@ const state = {
   execMode: 'grid', tf: localStorage.getItem('hb-tf') === '1m' ? '1m' : '5m',
   chart: null, series: null, markers: null, trailSeries: null,
   priceLines: [], mcharts: [], centerRange: null,
+  // Защита от гонки: старые ответы review/matrix не должны перерисовывать чужой сигнал.
+  reviewSeq: 0, matrixSeq: 0, signalsSeq: 0,
 };
 
 // Окна — по времени: M5-значения в барах умножаются на 5 для M1.
@@ -119,7 +121,10 @@ function calcFitRange(candles, extraPrices) {
   (extraPrices || []).forEach((v) => {
     if (v === null || v === undefined || v === '') return; // Number(null)===0 — иначе шкала схлопнется к нулю
     const n = Number(v);
-    if (Number.isFinite(n)) { mn = Math.min(mn, n); mx = Math.max(mx, n); }
+    // PGv2 возвращает "0.0000000" для отсутствующего entry/exit — нулевая заглушка
+    // иначе рисует ось от 0 и подписи вроде 0.0000006 вместо 0.0476.
+    if (!Number.isFinite(n) || n === 0) return;
+    mn = Math.min(mn, n); mx = Math.max(mx, n);
   });
   if (!Number.isFinite(mn) || !Number.isFinite(mx)) return null;
   if (mn >= mx) { const e = Math.abs(mx) * 0.0005 || 0.000001; mn -= e; mx += e; }
@@ -135,6 +140,8 @@ function utcTick(t, type) {
 }
 
 async function loadSignals() {
+  state.reviewSeq += 1; state.matrixSeq += 1; state.signalsSeq += 1;
+  const mySeq = state.signalsSeq;
   const stopTake = $('f-outcome').value === 'STOP_TAKE';
   // STOP TAKE — отработавшие (закрытые по стопу или тейку, любая сторона):
   // сторону уважаем как выбрал пользователь, исход дофильтровываем на клиенте.
@@ -147,6 +154,8 @@ async function loadSignals() {
   if ($('f-from').value) q.set('date_from', $('f-from').value);
   if ($('f-to').value) q.set('date_to', $('f-to').value);
   const d = await api('/api/hourbounce/signals?' + q.toString());
+  // Защита от гонки: старый ответ поиска не перезаписывает новый список.
+  if (mySeq !== state.signalsSeq) return;
   let items = d.items || [];
   const fo = $('f-outcome').value;
   if (stopTake) items = items.filter((s) => ['STOP', 'TAKE'].includes(String(s.outcome_arch || '').toUpperCase()));
@@ -186,11 +195,11 @@ function selectSignal(i) {
 function setTabs() {
   document.querySelectorAll('#tabs-entry button').forEach((b) => {
     b.classList.toggle('on', b.dataset.e === state.entry);
-    b.onclick = () => { state.entry = b.dataset.e; setTabs(); loadReview(); };
+    b.onclick = () => { state.entry = b.dataset.e; setTabs(); state.reviewSeq++; loadReview(); };
   });
   document.querySelectorAll('#tabs-sl button').forEach((b) => {
     b.classList.toggle('on', Number(b.dataset.s) === state.sl);
-    b.onclick = () => { state.sl = Number(b.dataset.s); setTabs(); loadReview(); };
+    b.onclick = () => { state.sl = Number(b.dataset.s); setTabs(); state.reviewSeq++; loadReview(); };
   });
   document.querySelectorAll('#tabs-tf button').forEach((b) => {
     b.classList.toggle('on', b.dataset.tf === state.tf);
@@ -200,6 +209,7 @@ function setTabs() {
       localStorage.setItem('hb-tf', state.tf);
       setTabs();
       updateTfLabels();
+      state.reviewSeq++; state.matrixSeq++;
       if (state.mode === 'matrix') loadMatrix();
       else loadReview();
     };
@@ -253,6 +263,7 @@ function setExecTabs() {
       if (b.disabled) return;
       state.execMode = b.dataset.x;
       setExecTabs();
+      state.reviewSeq++;
       loadReview();
     };
   });
@@ -266,6 +277,7 @@ function setExecTabs() {
 async function loadReview() {
   if (!state.sel) return;
   const s = state.sel;
+  const seq = ++state.reviewSeq;
   $('res-line').textContent = `${s.symbol} · ${s.side} · level ${s.level_price} · ${s.dt_place || ''} — загрузка...`;
   $('banner').classList.remove('on');
   const rf = state.forceRefresh ? '&refresh=1' : '';
@@ -276,6 +288,11 @@ async function loadReview() {
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
+  }
+  // Защита от гонки: старый ответ (другой сигнал/настройки) не перерисовывает график.
+  if (seq !== state.reviewSeq || state.sel?.signal_id !== s.signal_id || state.mode !== 'single') return;
+  if (d.signal) {
+    state.sel = { ...state.sel, price_precision: d.signal.price_precision, tick_size: d.signal.tick_size };
   }
   renderReview(d);
 }
@@ -387,6 +404,7 @@ function setMode(m) {
   $('tabs-exec').style.display = single ? '' : 'none';
   $('exec-line').style.display = single ? '' : 'none';
   if (!state.sel) return;
+  state.reviewSeq++; state.matrixSeq++;
   if (m === 'matrix') loadMatrix();
   else loadReview();
 }
@@ -399,6 +417,7 @@ $('m-export').onclick = () => {
 $('m-refresh').onclick = () => {
   if (!state.sel) return;
   state.forceRefresh = true;
+  state.reviewSeq++; state.matrixSeq++;
   if (state.mode === 'matrix') loadMatrix();
   else loadReview();
 };
@@ -432,6 +451,7 @@ function cellMarkers(cell, tmap, times) {
 async function loadMatrix() {
   if (!state.sel) return;
   const s = state.sel;
+  const seq = ++state.matrixSeq;
   $('res-line').textContent = `${s.symbol} · матрица 9 комбинаций — загрузка...`;
   $('banner').classList.remove('on');
   const rf = state.forceRefresh ? '&refresh=1' : '';
@@ -442,6 +462,11 @@ async function loadMatrix() {
   } catch (e) {
     $('res-line').textContent = 'ошибка: ' + e.message;
     return;
+  }
+  // Защита от гонки: старый ответ (другой сигнал/настройки) не перерисовывает матрицу.
+  if (seq !== state.matrixSeq || state.sel?.signal_id !== s.signal_id || state.mode !== 'matrix') return;
+  if (d.signal) {
+    state.sel = { ...state.sel, price_precision: d.signal.price_precision, tick_size: d.signal.tick_size };
   }
   destroyMatrix();
   const box = $('matrix');

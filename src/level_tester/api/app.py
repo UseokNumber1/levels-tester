@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import select
 
 from level_tester.application.ingestion import DataIngestionService
 from level_tester.application.instruments import InstrumentService
@@ -898,11 +899,7 @@ def _load_run(run_id: str, seed: list[Candle] | None) -> None:
         service.update_loading(run_id, 95, "initializing engine")
         _persist_run(run)
         instrument_tick = instrument.tick_size or Decimal("0.01")
-        instrument_precision = (
-            instrument.price_precision
-            if instrument.price_precision
-            else price_precision_from_tick(instrument_tick)
-        )
+        instrument_precision = price_precision_from_tick(instrument_tick)
         config = replace(
             default_config,
             level=replace(default_config.level, tick_size=instrument_tick),
@@ -1259,23 +1256,60 @@ def _hb_archive_trade(signal_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _hb_price_specs(symbols: set[str], fallback_prices: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    """Точность цены для множества символов одним запросом к каталогу.
+
+    Для символов без строки в БД — точность по знакам entry_price (без доп. сессии).
+    """
+    unique = {str(s).upper() for s in symbols if s}
+    specs: dict[str, dict[str, Any]] = {}
+    try:
+        with session_factory() as session:
+            rows = session.scalars(
+                select(InstrumentRow).where(InstrumentRow.symbol.in_(unique))
+            ).all()
+            for row in rows:
+                if row and row.tick_size:
+                    tick = Decimal(str(row.tick_size))
+                    specs[row.symbol] = {
+                        "price_precision": price_precision_from_tick(tick),
+                        "tick_size": str(tick),
+                    }
+    except Exception:
+        logger.debug("hourbounce price specs batch query failed", exc_info=True)
+    for sym in unique:
+        if sym in specs:
+            continue
+        price = (fallback_prices or {}).get(sym)
+        if price is None:
+            continue
+        try:
+            exp = Decimal(str(price)).normalize().as_tuple().exponent
+            specs[sym] = {"price_precision": max(0, min(8, -exp)), "tick_size": None}
+        except Exception:
+            logger.debug("hourbounce price spec fallback failed for %s", sym, exc_info=True)
+    return specs
+
+
 def _hb_price_spec(symbol: str, fallback_price: float | str) -> dict[str, Any]:
-    """Биржевая точность цены: tick_size/price_precision из каталога, иначе по знакам цены."""
+    """Биржевая точность цены: tick_size и точность из него, иначе по знакам цены."""
     try:
         with session_factory() as session:
             row = instrument_repository.find(session, symbol)
             if row is not None and row.tick_size:
                 tick = Decimal(str(row.tick_size))
-                prec = int(row.price_precision) if row.price_precision is not None else None
-                if prec is None:
-                    prec = price_precision_from_tick(tick)
+                # Точность отображения — из шага цены (как в replay), а не из
+                # exchange price_precision (для TREEUSDT это 7 вместо 5 и шкала
+                # рисуется с лишними нулями и сдвигается к 0.0000006).
+                prec = price_precision_from_tick(tick)
                 return {"price_precision": prec, "tick_size": str(tick)}
     except Exception:
-        pass
+        logger.debug("hourbounce price spec lookup failed for %s", symbol, exc_info=True)
     try:
         exp = Decimal(str(fallback_price)).normalize().as_tuple().exponent
         prec = max(0, min(8, -exp))
     except Exception:
+        logger.debug("hourbounce price spec fallback failed for %s", symbol, exc_info=True)
         prec = 4
     return {"price_precision": prec, "tick_size": None}
 
@@ -1389,6 +1423,12 @@ async def hourbounce_signals(
         arch_extra = {}
 
     items: list[dict[str, Any]] = []
+    # Точность цены для всех сигналов одним запросом к каталогу (иначе N сессий).
+    fallback_prices: dict[str, Any] = {}
+    for s in signals:
+        if s.symbol and s.symbol not in fallback_prices:
+            fallback_prices[s.symbol] = s.entry_price
+    price_specs = _hb_price_specs({s.symbol for s in signals if s.symbol}, fallback_prices)
     for s in signals:
         hb_side = "LONG" if str(s.side).upper() in ("LONG", "BUY") else "SHORT"
         if side and side.upper() not in ("ALL", hb_side):
@@ -1414,6 +1454,7 @@ async def hourbounce_signals(
                 pass
         _created_dt = _hb_parse_time(s.timestamp)
         _worked_dt = _hb_parse_time(extra.get("touch_ref"))
+        spec = price_specs.get(str(s.symbol).upper()) or {}
         items.append({
             "signal_id": s.signal_id,
             "symbol": s.symbol,
@@ -1439,6 +1480,8 @@ async def hourbounce_signals(
             "pnl_pct_arch": extra.get("pnl_pct_arch"),
             "real_trade": extra.get("real_trade"),
             "pg_available": s.stop_loss is not None,
+            "price_precision": spec.get("price_precision"),
+            "tick_size": spec.get("tick_size"),
             "source": s.source,
         })
     if traded_only:
