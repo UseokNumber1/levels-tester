@@ -233,6 +233,11 @@ async def report_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "report.html")
 
 
+@app.get("/report-tm1", include_in_schema=False)
+async def report_tm1_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "report_tm1.html")
+
+
 @app.post("/api/instruments/sync")
 async def sync_instruments() -> dict[str, Any]:
     try:
@@ -1035,7 +1040,7 @@ def _last_closed_boundary() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# HourBounce Review Lite: один сигнал из архива PGv2 -> реплей T1M/T2/T3 x SL
+# HourBounce Review Lite: один сигнал из архива PGv2 -> реплей T1M/T1L/T2/T3 x SL
 # ---------------------------------------------------------------------------
 def _hb_parse_time(raw: str | None) -> datetime | None:
     if not raw:
@@ -1162,7 +1167,7 @@ def _hb_real_trade_info(
     pnl_percent: float | str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Карта реальной архивной сделки на сетку T1M/T2/T3 × SL1/SL2/SL3.
+    """Карта реальной архивной сделки на сетку T1M/T1L/T2/T3 × SL1/SL2/SL3.
 
     entry: confirmation_bars_required 0->T1M (маркет на касании, ближайший по
     смыслу к req=0), 1->T2, 2->T3 (иначе None).
@@ -1551,10 +1556,11 @@ def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf: st
 def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
                      refresh: bool = False, tf: str = "5m",
                      exec_mode: str = "grid") -> dict[str, Any]:
-    """Матрица 9 ячеек HourBounce (T1M/T2/T3 × SL, сетка).
+    """Матрица 12 ячеек HourBounce (T1M/T1L/T2/T3 × SL, сетка).
 
     Свечи ТФ (5m/1m): сначала БД, дыры догружаются с Binance идемпотентно.
-    T1M дополнительно тянет M1-ряд того же окна (маркет на касании).
+    T1M/T1L дополнительно тянут M1-ряд того же окна (маркет на касании /
+    заранее выставленная лимитка с заливкой по level).
     lookforward/pre/post — бары запрошенного ТФ. exec_mode: grid (голый
     трейлинг 1%/1%) или grid_be (SL сетки + БУ из конфига + трейлинг после БУ).
     Ячейки: кеш hb_reviews по (signal_id, config_fp[ТФ+режим], lookforward);
@@ -1615,13 +1621,13 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
                 hit = get_review_payload(session, signal_id, lookforward, tf, exec_mode)
         except Exception:
             hit = None
-        if hit and isinstance(hit.get("cells"), list) and len(hit["cells"]) == 9:
+        if hit and isinstance(hit.get("cells"), list) and len(hit["cells"]) == 12:
             # хвост за окном жизни на итог не влияет — сверяем границу и размер
             # окна: тогда каждая новая свеча кеш не инвалидирует, а закрытые
             # дыры внутри окна (счётчик/граница изменились) — инвалидируют.
-            # Плюс состав входов: старый кеш хранит T1, актуальный — T1M.
+            # Плюс состав входов: старый кеш хранит T1 или T1M/T2/T3 без T1L.
             if hit.get("window_last") == window_last and hit.get("window_count") == window_count:
-                if {c.get("entry") for c in hit["cells"]} == {"T1M", "T2", "T3"}:
+                if {c.get("entry") for c in hit["cells"]} == {"T1M", "T1L", "T2", "T3"}:
                     cells = hit["cells"]
     cells_hit = cells is not None
     if cells is None:
@@ -1629,7 +1635,7 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
             side=side, level_price=Decimal(str(sig.entry_price)),
             signal_time=sig_time, candles=candles, config=cfg,
             exec_mode=exec_mode,  # type: ignore[arg-type]
-            m1_candles=m1_candles,
+            m1_candles=m1_candles, tf=tf,
         )
         cells = []
         for res in results:
@@ -1648,26 +1654,28 @@ def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
         except Exception:
             pass
 
-    # T1M всегда считается свежо поверх кеша: валидность hb_reviews привязана
-    # к M5-окну (window_last/count) и не видит изменений M1-ряда. Если T1M
-    # однажды посчитался на дырявых M1 (ложный NO_ENTRY), кеш отдавал бы его
-    # вечно. T2/T3 из кеша оставляем — они M5-зависимы и окном покрыты.
+    # T1M/T1L всегда считаются свежо поверх кеша: валидность hb_reviews
+    # привязана к M5-окну (window_last/count) и не видит изменений M1-ряда.
+    # Если T1M/T1L однажды посчитались на дырявых M1 (ложный NO_ENTRY), кеш
+    # отдавал бы их вечно. T2/T3 из кеша оставляем — они M5-зависимы и окном покрыты.
     # Свежий пересчёт тем же review_matrix уже использовал эти же M1.
     if cells_hit and m1_candles:
         try:
-            fresh_t1m = []
-            for _sl in (1, 2, 3):
-                _ex = grid_be_exec(_sl, cfg) if exec_mode == "grid_be" else grid_exec(_sl, cfg)
-                _res = review_signal(
-                    side=side, level_price=Decimal(str(sig.entry_price)),
-                    signal_time=sig_time, candles=candles, entry_code="T1M",
-                    sl_index=_sl, config=cfg, exec_params=_ex, m1_candles=m1_candles)
-                _j = _hb_result_json(_res, side)
-                _j["sl_pct"] = str(cfg.sl_sizes[_sl - 1])
-                fresh_t1m.append(_j)
-            cells = [c for c in cells if c.get("entry") != "T1M"] + fresh_t1m
+            fresh_t1x = []
+            for _code in ("T1M", "T1L"):
+                for _sl in (1, 2, 3):
+                    _ex = grid_be_exec(_sl, cfg) if exec_mode == "grid_be" else grid_exec(_sl, cfg)
+                    _res = review_signal(
+                        side=side, level_price=Decimal(str(sig.entry_price)),
+                        signal_time=sig_time, candles=candles, entry_code=_code,  # type: ignore[arg-type]
+                        sl_index=_sl, config=cfg, exec_params=_ex, m1_candles=m1_candles,
+                        tf=tf)
+                    _j = _hb_result_json(_res, side)
+                    _j["sl_pct"] = str(cfg.sl_sizes[_sl - 1])
+                    fresh_t1x.append(_j)
+            cells = [c for c in cells if c.get("entry") not in ("T1M", "T1L")] + fresh_t1x
         except Exception:  # noqa: BLE001 - при сбое оставляем кешированные ячейки
-            logger.debug("hourbounce T1M refresh failed: %s", signal_id, exc_info=True)
+            logger.debug("hourbounce T1M/T1L refresh failed: %s", signal_id, exc_info=True)
 
     by_open = {c.open_time: i for i, c in enumerate(candles)}
     try:
@@ -1761,7 +1769,7 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
         side=side, level_price=Decimal(str(sig.entry_price)), signal_time=sig_time,
         candles=candles, entry_code="PG", sl_index=0,
         config=cfg, exec_params=ex,
-        pg_required=int(meta.get("required_bars", 2)),
+        pg_required=int(meta.get("required_bars", 2)), tf=tf,
     )
     all_ts = [c.open_time for c in candles]
     # запас контекста графика — по времени: множитель относительно M5
@@ -1821,7 +1829,7 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
 @app.get("/api/hourbounce/review")
 async def hourbounce_review(
     signal_id: str = Query(min_length=1),
-    entry: str = Query(default="T1M", pattern=r"^(T1M|T2|T3)$"),
+    entry: str = Query(default="T1M", pattern=r"^(T1M|T1L|T2|T3)$"),
     sl: int = Query(default=1, ge=1, le=3),
     lookforward: int = Query(default=2000, ge=20, le=100000),
     pre: int = Query(default=30, ge=0, le=1500),
@@ -1889,8 +1897,17 @@ def _hb_price_str(v: object) -> str | None:
 
 def _hb_result_json(res, side: str | None = None) -> dict[str, Any]:
     pnl_pct: str | None = None
+    gross_pct: str | None = None
+    fee_pct: str | None = None
     try:
-        if side in ("LONG", "SHORT") and res.entry_price and res.exit_price:
+        net = getattr(res, "net_pnl_pct", None)
+        if side in ("LONG", "SHORT") and net is not None:
+            pnl_pct = str(round(float(net), 4))
+            gross = getattr(res, "gross_pnl_pct", None)
+            fee = getattr(res, "fee_pct", None)
+            gross_pct = str(round(float(gross), 4)) if gross is not None else None
+            fee_pct = str(round(float(fee), 4)) if fee is not None else None
+        elif side in ("LONG", "SHORT") and res.entry_price and res.exit_price:
             e = float(res.entry_price)
             x = float(res.exit_price)
             if e != 0:
@@ -1910,6 +1927,8 @@ def _hb_result_json(res, side: str | None = None) -> dict[str, Any]:
         "exit_price": _hb_price_str(res.exit_price),
         "exit_kind": res.exit_kind,
         "pnl_pct": pnl_pct,
+        "gross_pnl_pct": gross_pct,
+        "fee_pct": fee_pct,
         "be_price": _hb_price_str(res.be_price),
         "r_multiple": str(round(res.r_multiple, 4)) if res.r_multiple is not None else None,
         "max_profit_pct": str(round(res.max_profit_pct, 4)) if res.max_profit_pct is not None else None,
@@ -1939,7 +1958,7 @@ async def hourbounce_matrix(
     tf: str = Query(default="5m", pattern=r"^(5m|1m)$"),
     exec_mode: str = Query(default="grid", pattern=r"^(grid|grid_be)$"),
 ) -> dict[str, Any]:
-    """Все 9 комбинаций T1M/T2/T3 x SL1/SL2/SL3 за одну загрузку свечей (с кешем).
+    """Все 12 комбинаций T1M/T1L/T2/T3 x SL1/SL2/SL3 за одну загрузку свечей (с кешем).
     lookforward/pre/post — бары ТФ (tf=5m|1m). exec_mode: grid или grid_be."""
     return _hb_build_matrix(signal_id, lookforward, pre, post, refresh=refresh, tf=tf,
                             exec_mode=exec_mode)
@@ -2036,18 +2055,19 @@ for(const cell of D.cells){
 
 
 # ---------------------------------------------------------------------------
-# PnL-отчёт: все сигналы × 9 комбинаций (T1M/T2/T3 × SL1/SL2/SL3).
+# PnL-отчёт: все сигналы × 12 комбинаций (T1M/T1L/T2/T3 × SL1/SL2/SL3).
 # T1M — маркет на касании (триггер и исполнение полностью на M1, вход по принту=level).
+# T1L — заранее выставленная лимитка (заливка в касание всегда по level, без lookahead).
 # T2/T3 — входы с подтверждением на M5 (матрица считает их сама, здесь переиспользуются).
-# T0/T1/T1L остаются в движке для исследований, но в отчёт не входят.
+# T0/T1 остаются в движке для исследований, но в отчёт не входят.
 # Клетка = PnL% со знаком стороны (нет входа -> 0), подвал = суммы по столбцам.
 # ---------------------------------------------------------------------------
-HB_REPORT_COLS = [f"{t}/SL{s}" for t in ("T1M", "T2", "T3") for s in (1, 2, 3)]
+HB_REPORT_COLS = [f"{t}/SL{s}" for t in ("T1M", "T1L", "T2", "T3") for s in (1, 2, 3)]
 # Колонки Grid+БУ: те же входы/стопы, но со стопом в БУ (триггер/лок из конфига)
 # и трейлингом строго после БУ. Ключ базовой колонки = без суффикса "+БУ".
 # В отчёте колонка +БУ идёт сразу за своей базовой (чередование, см. _hb_report_columns).
 HB_BE_SUFFIX = "+БУ"
-HB_BE_COLS = [f"{t}{HB_BE_SUFFIX}/SL{s}" for t in ("T1M", "T2", "T3") for s in (1, 2, 3)]
+HB_BE_COLS = [f"{t}{HB_BE_SUFFIX}/SL{s}" for t in ("T1M", "T1L", "T2", "T3") for s in (1, 2, 3)]
 
 
 def _hb_be_base_col(col: str) -> str:
@@ -2072,16 +2092,26 @@ _hb_report_counter = 0
 
 
 def _hb_cell_pnl(cell: dict[str, Any], side: str) -> float:
-    """PnL% клетки со знаком стороны. Нет входа/цены — 0."""
+    """Net-PnL% клетки со знаком стороны (gross минус комиссии maker/taker).
+
+    Нет входа/цены — 0. Вход T1L (лимитка) — maker, остальные входы — taker;
+    выход TP (лимит) — maker, SL/trail (стоп-маркет) — taker.
+    Ячейки из старого кеша без entry/exit_kind считаются консервативно (taker/taker).
+    """
     try:
         if cell.get("outcome") == "NO_ENTRY" or not cell.get("entry_price") or not cell.get("exit_price"):
             return 0.0
+        from level_tester.backtester.hourbounce import MAKER_FEE_PCT, TAKER_FEE_PCT
+
         e = float(cell["entry_price"])
         x = float(cell["exit_price"])
         if e == 0:
             return 0.0
-        r = (x - e) / e * 100 if side == "LONG" else (e - x) / e * 100
-        return round(r, 4)
+        gross = (x - e) / e * 100 if side == "LONG" else (e - x) / e * 100
+        entry_fee = float(MAKER_FEE_PCT) if cell.get("entry") == "T1L" else float(TAKER_FEE_PCT)
+        exit_fee = float(MAKER_FEE_PCT) if cell.get("exit_kind") == "tp" else float(TAKER_FEE_PCT)
+        fee = (e * entry_fee / 100 + x * exit_fee / 100) / e * 100
+        return round(gross - fee, 4)
     except (TypeError, ValueError):
         return 0.0
 
@@ -2090,7 +2120,7 @@ class HbReportRequest(BaseModel):
     signal_ids: list[str] = Field(min_length=1, max_length=5000)
     lookforward: int = Field(default=2000, ge=20, le=100000)
     tf: str = Field(default="5m", pattern=r"^(5m|1m)$")
-    with_be: bool = Field(default=False, description="Добавить 9 колонок Grid+БУ (стоп в БУ из конфига)")
+    with_be: bool = Field(default=False, description="Добавить 12 колонок Grid+БУ (стоп в БУ из конфига)")
 
 
 @app.post("/api/hourbounce/report", status_code=202)
@@ -2180,16 +2210,16 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                 by_key = {(c["entry"], c["sl_index"]): c for c in data["cells"]}
                 by_key_be = ({(c["entry"], c["sl_index"]): c for c in data_be["cells"]}
                              if data_be else {})
-                # T1M-страховка: матрица уже считает T1M сама (_hb_build_matrix),
+                # T1X-страховка: матрица уже считает T1M/T1L сама (_hb_build_matrix),
                 # добор нужен только если ячейки реально нет (старый кеш, дыра M1),
                 # иначе пропускаем лишние загрузки свечей. T2/T3 всегда из матрицы.
-                _t1m_wanted = any(_hb_be_base_col(c).split("/")[0] == "T1M" for c in columns)
-                _t1m_missing = _t1m_wanted and (
-                    any(("T1M", _sl) not in by_key for _sl in (1, 2, 3))
+                _t1x_wanted = [_c0 for _c0 in {_hb_be_base_col(c).split("/")[0] for c in columns} if _c0 in ("T1M", "T1L")]
+                _t1x_missing = bool(_t1x_wanted) and (
+                    any((_code, _sl) not in by_key for _code in _t1x_wanted for _sl in (1, 2, 3))
                     or (with_be and data_be is not None
-                        and any(("T1M", _sl) not in by_key_be for _sl in (1, 2, 3)))
+                        and any((_code, _sl) not in by_key_be for _code in _t1x_wanted for _sl in (1, 2, 3)))
                 )
-                if _t1m_missing:
+                if _t1x_missing:
                     try:
                         from level_tester.backtester.hourbounce import (
                             config_for_tf as _t0_cfg_tf,
@@ -2217,27 +2247,28 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                                 _start, _end, refresh=False, tf="1m")
                         except Exception:
                             _m1 = None
-                        for _sl in (1, 2, 3):
-                            if ("T1M", _sl) not in by_key:
-                                _rx = _t0_rs(
-                                    side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
-                                    signal_time=_st, candles=_candles, entry_code="T1M",  # type: ignore[arg-type]
-                                    sl_index=_sl, config=_cfg, exec_params=_t0_ge(_sl, _cfg),
-                                    m1_candles=_m1)
-                                _jx = _hb_result_json(_rx, _side)
-                                _jx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
-                                by_key[("T1M", _sl)] = _jx
-                            if with_be and data_be is not None and ("T1M", _sl) not in by_key_be:
-                                _rbx = _t0_rs(
-                                    side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
-                                    signal_time=_st, candles=_candles, entry_code="T1M",  # type: ignore[arg-type]
-                                    sl_index=_sl, config=_cfg, exec_params=_t0_gbe(_sl, _cfg),
-                                    m1_candles=_m1)
-                                _jbx = _hb_result_json(_rbx, _side)
-                                _jbx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
-                                by_key_be[("T1M", _sl)] = _jbx
-                    except Exception as exc:  # noqa: BLE001 - T1M-добор не роняет строку отчёта
-                        logger.debug("hourbounce report T1M failed: %s", sid, exc_info=True)
+                        for _code in ("T1M", "T1L"):
+                            for _sl in (1, 2, 3):
+                                if (_code, _sl) not in by_key:
+                                    _rx = _t0_rs(
+                                        side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
+                                        signal_time=_st, candles=_candles, entry_code=_code,  # type: ignore[arg-type]
+                                        sl_index=_sl, config=_cfg, exec_params=_t0_ge(_sl, _cfg),
+                                        m1_candles=_m1, tf=tf)
+                                    _jx = _hb_result_json(_rx, _side)
+                                    _jx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
+                                    by_key[(_code, _sl)] = _jx
+                                if with_be and data_be is not None and (_code, _sl) not in by_key_be:
+                                    _rbx = _t0_rs(
+                                        side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
+                                        signal_time=_st, candles=_candles, entry_code=_code,  # type: ignore[arg-type]
+                                        sl_index=_sl, config=_cfg, exec_params=_t0_gbe(_sl, _cfg),
+                                        m1_candles=_m1, tf=tf)
+                                    _jbx = _hb_result_json(_rbx, _side)
+                                    _jbx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
+                                    by_key_be[(_code, _sl)] = _jbx
+                    except Exception:  # noqa: BLE001 - T1X-добор не роняет строку отчёта
+                        logger.debug("hourbounce report T1M/T1L failed: %s", sid, exc_info=True)
                 cells = {}
                 row_total = 0.0
                 for col in columns:
@@ -2288,6 +2319,616 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                          "count": len(rows), "tf": tf, "with_be": with_be,
                          "be_params": {"trigger_pct": str(GRID_BE_TRIGGER_PCT),
                                        "lock_pct": str(GRID_BE_LOCK_PCT)} if with_be else None}
+        job["status"] = "completed"
+    except Exception as exc:  # noqa: BLE001 - граница фонового job
+        job["status"] = "failed"
+        job["error"] = str(exc)[:500]
+
+
+# ---------------------------------------------------------------------------
+# TM1-отчёт: копия PnL-отчёта, но только тип входа T1M (маркет на касании),
+# всё исполнение строго на M1, параметры удержания задаются из UI.
+# Колонка одна — TM1 с текущим набором params; каждый прогон = один набор.
+# Клетка = net-PnL% со знаком стороны (нет входа -> 0).
+# ---------------------------------------------------------------------------
+TM1_COLUMN = "TM1"
+
+_hb_tm1_jobs: dict[str, dict[str, Any]] = {}
+_hb_tm1_counter = 0
+
+
+class HbReportTm1Request(BaseModel):
+    signal_ids: list[str] = Field(min_length=1, max_length=5000)
+    lookforward: int = Field(default=10000, ge=20, le=100000)
+    sl_pct: float = Field(default=1.0, ge=0.05, le=10.0, description="Стоп % от входа")
+    tp_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="Фикс-тейк % от входа, null = нет")
+    trail_activation_pct: float | None = Field(default=1.0, ge=0.05, le=50.0, description="% активации трейлинга")
+    trail_distance_pct: float | None = Field(default=1.0, ge=0.05, le=20.0, description="Размер трейлинга %")
+    be_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="% перевода стопа в БУ")
+    be_lock_pct: float = Field(default=0.1, ge=0.0, le=5.0, description="% лока в БУ от входа")
+    partial_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="% частичной фиксации")
+    partial_close_pct: float | None = Field(default=None, ge=1.0, le=99.0, description="Размер частички % позиции")
+
+    @field_validator("tp_pct", "trail_activation_pct", "trail_distance_pct",
+                     "be_trigger_pct", "partial_trigger_pct", "partial_close_pct",
+                     mode="before")
+    @classmethod
+    def _empty_to_none(cls, v: Any) -> Any:
+        # Пустые строки из UI (выключенный механизм) -> None.
+        if v is None or v == "":
+            return None
+        return v
+
+
+def _tm1_params_dict(req: HbReportTm1Request) -> dict[str, Any]:
+    return {
+        "sl_pct": req.sl_pct, "tp_pct": req.tp_pct,
+        "trail_activation_pct": req.trail_activation_pct,
+        "trail_distance_pct": req.trail_distance_pct,
+        "be_trigger_pct": req.be_trigger_pct, "be_lock_pct": req.be_lock_pct,
+        "partial_trigger_pct": req.partial_trigger_pct,
+        "partial_close_pct": req.partial_close_pct,
+    }
+
+
+@app.post("/api/hourbounce/report-tm1", status_code=202)
+async def hourbounce_report_tm1_run(request: HbReportTm1Request) -> dict[str, Any]:
+    global _hb_tm1_counter
+    _hb_tm1_counter += 1
+    job_id = f"hbtm1_{_hb_tm1_counter}"
+    _hb_tm1_jobs[job_id] = {
+        "status": "pending", "done": 0, "total": len(request.signal_ids),
+        "current": "", "result": None, "error": None, "tf": "1m",
+        "params": _tm1_params_dict(request),
+    }
+    Thread(target=_run_hb_tm1_report, args=(job_id, request), daemon=True).start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/hourbounce/report-tm1/status/{job_id}")
+async def hourbounce_report_tm1_status(job_id: str) -> dict[str, Any]:
+    job = _hb_tm1_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {k: v for k, v in job.items() if k != "result"}
+
+
+@app.get("/api/hourbounce/report-tm1/result/{job_id}")
+async def hourbounce_report_tm1_result(job_id: str) -> dict[str, Any]:
+    job = _hb_tm1_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=409, detail="job not completed yet")
+    return job["result"]
+
+
+def _tm1_normalize_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Нормализованные TM1-параметры: ноль/пусто = механизм выключен, пары — целиком."""
+    p = dict(params)
+    trail_on = p.get("trail_activation_pct") not in (None, 0, "") and p.get("trail_distance_pct") not in (None, 0, "")
+    be_on = p.get("be_trigger_pct") not in (None, 0, "")
+    part_on = p.get("partial_trigger_pct") not in (None, 0, "") and p.get("partial_close_pct") not in (None, 0, "")
+    if not trail_on:
+        p["trail_activation_pct"] = None
+        p["trail_distance_pct"] = None
+    if not be_on:
+        p["be_trigger_pct"] = None
+    if not part_on:
+        p["partial_trigger_pct"] = None
+        p["partial_close_pct"] = None
+    if p.get("tp_pct") in (0, ""):
+        p["tp_pct"] = None
+    return p
+
+
+def _tm1_compute_cell(side: str, entry_price: Any, sig_time: datetime,
+                      candles: list[Any], params: dict[str, Any], cfg: Any) -> dict[str, Any]:
+    """Чистая функция TM1: один прогон T1M на M1. Используется job/recalc/heatmap."""
+    from decimal import Decimal as _Dec
+
+    from level_tester.backtester.hourbounce import review_signal, tm1_exec
+
+    p = _tm1_normalize_params(params)
+    ex = tm1_exec(
+        sl_pct=p["sl_pct"],
+        tp_pct=p.get("tp_pct"),
+        be_trigger_pct=p.get("be_trigger_pct"),
+        be_lock_pct=p.get("be_lock_pct"),
+        trail_activation_pct=p.get("trail_activation_pct"),
+        trail_distance_pct=p.get("trail_distance_pct"),
+        partial_trigger_pct=p.get("partial_trigger_pct"),
+        partial_close_pct=p.get("partial_close_pct"),
+    )
+    res = review_signal(
+        side=side, level_price=_Dec(str(entry_price)),
+        signal_time=sig_time, candles=candles, entry_code="T1M",
+        sl_index=1, config=cfg, exec_params=ex,
+        m1_candles=candles, tf="1m")
+    cell = _hb_result_json(res, side)
+    pnl = _hb_cell_pnl(
+        {"outcome": cell.get("outcome"), "entry_price": cell.get("entry_price"),
+         "exit_price": cell.get("exit_price"), "entry": "T1M",
+         "exit_kind": cell.get("exit_kind")}, side)
+    events = cell.get("events") or []
+    return {
+        "pnl": pnl, "outcome": cell.get("outcome"),
+        "entry_price": cell.get("entry_price"), "exit_price": cell.get("exit_price"),
+        "entry_dt": cell.get("entry_dt"), "exit_dt": cell.get("exit_dt"),
+        "exit_kind": cell.get("exit_kind"),
+        "events": events, "r_multiple": cell.get("r_multiple"),
+        "sl_price": cell.get("sl_price"), "be_price": cell.get("be_price"),
+        "gross_pnl_pct": cell.get("gross_pnl_pct"), "fee_pct": cell.get("fee_pct"),
+        "max_profit_pct": cell.get("max_profit_pct"), "mae_pct": cell.get("mae_pct"),
+        "bars_in_trade": cell.get("bars_in_trade"),
+        "has_partial": any(e.get("type") == "partial" for e in events),
+        "has_be": any(e.get("type") == "breakeven" for e in events),
+    }
+
+
+def _tm1_build_rows(sess_items: list[dict[str, Any]], params: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    """Пересчёт всех строк сессии по кешированным свечам. Возвращает (rows, footer)."""
+    from level_tester.backtester.hourbounce import config_for_tf
+
+    cfg = config_for_tf("1m")
+    rows: list[dict[str, Any]] = []
+    footer = {TM1_COLUMN: 0.0, "TOTAL": 0.0}
+    for it in sess_items:
+        # Ошибка prepare (резолв/свечи) не маскируется: уходит в строку как error,
+        # meta (символ/дата) при этом сохраняется — вместо "?" виден реальный сигнал.
+        prep_error = it.get("error")
+        try:
+            if prep_error and not it.get("candles"):
+                raise RuntimeError(prep_error)
+            sig_time = _hb_parse_time(it.get("sig_time_iso"))
+            if sig_time is None:
+                raise RuntimeError(prep_error or "no signal time")
+            if not it.get("candles"):
+                # Свечи не загрузились в prepare (M1-дыра): честная строка
+                # с символом, а не "?". Ретрай — повторным prepare.
+                c = {"pnl": 0.0, "outcome": "NO_ENTRY", "reason": "no_m1",
+                     "entry_price": None, "exit_price": None,
+                     "entry_dt": None, "exit_dt": None, "exit_kind": None,
+                     "events": [], "r_multiple": None,
+                     "has_partial": False, "has_be": False}
+            else:
+                c = _tm1_compute_cell(it["side"], it["level_price"], sig_time, it["candles"], params, cfg)
+            d = round(c["pnl"], 2)
+            footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
+            footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
+            row_err = prep_error if (prep_error and c.get("outcome") in ("NO_ENTRY", "ERROR")) else None
+            rows.append({
+                "signal_id": it["signal_id"], "symbol": it.get("symbol") or "?", "side": it.get("side") or "?",
+                "level_price": it.get("level_price"), "dt_place": it.get("dt_place"),
+                "created_at": it.get("created_at"), "touch_ref": it.get("touch_ref"),
+                "created_ts": it.get("created_ts"), "worked_ts": it.get("worked_ts"),
+                "outcome_arch": None, "cells": {TM1_COLUMN: c}, "row_total": c["pnl"],
+                "best_pnl": c["pnl"],
+                "arch_status": it.get("arch_status"), "arch_pnl": it.get("arch_pnl"),
+                "traded": bool(it.get("traded")),
+                **({"error": str(row_err)[:200]} if row_err else {}),
+            })
+        except Exception as exc:  # noqa: BLE001 - один битый сигнал не роняет пересчёт
+            logger.debug("tm1 recalc signal failed: %s", it.get("signal_id"), exc_info=True)
+            err = str(exc)[:200] if str(exc) else (prep_error or "recalc failed")
+            rows.append({"signal_id": it.get("signal_id"), "symbol": it.get("symbol") or "?",
+                         "side": it.get("side") or "?",
+                         "level_price": it.get("level_price"), "dt_place": it.get("dt_place"),
+                         "outcome_arch": None,
+                         "created_at": it.get("created_at"), "touch_ref": it.get("touch_ref"),
+                         "created_ts": it.get("created_ts"), "worked_ts": it.get("worked_ts"),
+                         "cells": {TM1_COLUMN: {"pnl": 0.0, "outcome": "ERROR"}},
+                         "row_total": 0.0, "best_pnl": 0.0, "error": err[:200],
+                         "arch_status": it.get("arch_status"), "arch_pnl": it.get("arch_pnl"),
+                         "traded": bool(it.get("traded"))})
+    return rows, footer
+
+
+def _tm1_kpi(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """KPI + equity + гистограмма + счётчики исходов. Считается только на сервере."""
+    import math as _math
+
+    pnls = [float((r.get("cells") or {}).get(TM1_COLUMN, {}).get("pnl") or 0.0) for r in rows]
+    decided = [v for v in pnls if v != 0]
+    wins = [v for v in decided if v > 0]
+    losses = [v for v in decided if v < 0]
+    gross_win = round(sum(wins), 2)
+    gross_loss = round(sum(losses), 2)
+    pf = round(gross_win / abs(gross_loss), 3) if gross_loss else (None if not gross_win else float("inf"))
+    # equity в хронологии выставления
+    order = sorted(range(len(rows)), key=lambda i: (rows[i].get("dt_place") or "", rows[i].get("signal_id") or ""))
+    equity: list[float] = []
+    run = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for i in order:
+        run = round(run + round(pnls[i], 2), 2)
+        equity.append(run)
+        peak = max(peak, run)
+        max_dd = min(max_dd, round(run - peak, 2))
+    # гистограмма: "красивый" шаг бина (1/2/2.5/5×10^n), макс. ~24 бина
+    hist = {"bins": [], "counts": []}
+    mean_v = round(sum(decided) / len(decided), 3) if decided else 0.0
+    med_v = 0.0
+    if decided:
+        srt = sorted(decided)
+        mid = len(srt) // 2
+        med_v = round((srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2), 3)
+        lo, hi = srt[0], srt[-1]
+        raw_step = (hi - lo) / 24 if hi > lo else abs(hi) / 10 or 0.1
+        mag = 10 ** int(_math.floor(_math.log10(raw_step))) if raw_step > 0 else 0.1
+        step = next((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw_step), 10 * mag)
+        start = _math.floor(lo / step) * step
+        edges = [round(start + step * k, 6) for k in range(int((hi - start) / step) + 2)]
+        counts = [0] * (len(edges) - 1)
+        for v in decided:
+            k = min(len(counts) - 1, max(0, int((v - start) / step)))
+            counts[k] += 1
+        hist = {"bins": edges, "counts": counts, "step": step}
+    outcomes: dict[str, int] = {}
+    exits: dict[str, int] = {}
+    n_partial = 0
+    n_be = 0
+    for r in rows:
+        c = (r.get("cells") or {}).get(TM1_COLUMN, {})
+        outcomes[str(c.get("outcome"))] = outcomes.get(str(c.get("outcome")), 0) + 1
+        exits[str(c.get("exit_kind"))] = exits.get(str(c.get("exit_kind")), 0) + 1
+        n_partial += 1 if c.get("has_partial") else 0
+        n_be += 1 if c.get("has_be") else 0
+    total = round(sum(round(v, 2) for v in pnls), 2)
+    return {
+        "total": total, "count": len(rows), "decided": len(decided),
+        "wins": len(wins), "losses": len(losses),
+        "winrate": round(len(wins) / len(decided) * 100, 1) if decided else None,
+        "avg": round(total / len(decided), 3) if decided else 0.0,
+        "avg_win": round(gross_win / len(wins), 3) if wins else 0.0,
+        "avg_loss": round(gross_loss / len(losses), 3) if losses else 0.0,
+        "pf": pf, "max_dd": max_dd,
+        "equity": equity, "hist": hist, "mean": mean_v, "median": med_v,
+        "outcomes": outcomes, "exits": exits,
+        "n_partial": n_partial, "n_be": n_be,
+    }
+
+
+def _run_hb_tm1_report(job_id: str, request: HbReportTm1Request) -> None:
+    """Фоновая задача TM1: каждый сигнал — один прогон T1M на M1 с кастомным ExecParams."""
+    from level_tester.backtester.hourbounce import config_for_tf
+
+    job = _hb_tm1_jobs[job_id]
+    columns = [TM1_COLUMN]
+    rows: list[dict[str, Any]] = []
+    footer = {TM1_COLUMN: 0.0, "TOTAL": 0.0}
+    try:
+        job["status"] = "running"
+        from level_tester.infrastructure.hourbounce_store import load_candles_cached
+
+        arch = _hb_archive_trades(request.signal_ids)
+        cfg = config_for_tf("1m")
+        params = _tm1_params_dict(request)
+        for i, sid in enumerate(request.signal_ids):
+            job["current"] = sid
+            info = arch.get(sid, {})
+            try:
+                sig_obj, _meta, _dtp, sig_time, side, _ps = _hb_resolve_signal(sid)
+                step = 1
+                start = sig_time - 30 * timedelta(minutes=step)
+                now = datetime.now(UTC)
+                now_floor = now.replace(second=0, microsecond=0)
+                end = min(sig_time + request.lookforward * timedelta(minutes=step), now_floor)
+                candles, _stats = load_candles_cached(
+                    session_factory, binance_client, sig_obj.symbol,
+                    start, end, refresh=False, tf="1m")
+                cell = _tm1_compute_cell(side, sig_obj.entry_price, sig_time, candles, params, cfg)
+                pnl = cell["pnl"]
+                cells = {TM1_COLUMN: cell}
+                d = round(pnl, 2)
+                footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
+                footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
+                created_dt = _hb_parse_time(sig_obj.timestamp)
+                worked_dt = _hb_parse_time(_meta.get("touch_ref"))
+                rows.append({
+                    "signal_id": sid, "symbol": sig_obj.symbol, "side": side,
+                    "level_price": sig_obj.entry_price, "dt_place": _dtp,
+                    "created_at": sig_obj.timestamp, "touch_ref": _meta.get("touch_ref"),
+                    "created_ts": int(created_dt.timestamp()) if created_dt else None,
+                    "worked_ts": int(worked_dt.timestamp()) if worked_dt else None,
+                    "outcome_arch": None, "cells": cells, "row_total": pnl,
+                    "best_pnl": pnl,
+                    "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
+                    "traded": bool(info.get("traded")),
+                })
+            except Exception as exc:  # noqa: BLE001 - один битый сигнал не роняет отчёт
+                logger.debug("hourbounce TM1 report signal failed: %s", sid, exc_info=True)
+                rows.append({"signal_id": sid, "symbol": "?", "side": "?",
+                             "level_price": None, "dt_place": None, "outcome_arch": None,
+                             "created_at": None, "touch_ref": None,
+                             "created_ts": None, "worked_ts": None,
+                             "cells": {TM1_COLUMN: {"pnl": 0.0, "outcome": "ERROR"}},
+                             "row_total": 0.0, "best_pnl": 0.0, "error": str(exc)[:200],
+                             "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
+                             "traded": bool(info.get("traded"))})
+            job["done"] = i + 1
+        job["result"] = {"columns": columns, "rows": rows, "footer": footer,
+                         "count": len(rows), "tf": "1m", "entry": "T1M",
+                         "params": params, "kpi": _tm1_kpi(rows)}
+        job["status"] = "completed"
+    except Exception as exc:  # noqa: BLE001 - граница фонового job
+        job["status"] = "failed"
+        job["error"] = str(exc)[:500]
+
+
+# ---------------------------------------------------------------------------
+# TM1 live: тяжёлая фаза (prepare, job) грузит M1-окна один раз в session-cache,
+# лёгкая фаза (recalc, sync) пересчитывает строки по кешу — для бегунков.
+# ---------------------------------------------------------------------------
+_TM1_SESS: dict[str, dict[str, Any]] = {}
+_TM1_SESS_COUNTER = 0
+_TM1_SESS_MAX = 3
+_TM1_SESS_TTL_MIN = 30
+_TM1_PREP_JOBS: dict[str, dict[str, Any]] = {}
+_TM1_PREP_COUNTER = 0
+_TM1_HEAT_JOBS: dict[str, dict[str, Any]] = {}
+_TM1_HEAT_COUNTER = 0
+
+
+def _tm1_sess_touch() -> None:
+    """TTL + LRU-вытеснение сессий (свечи M1 тяжёлые — держим максимум 3)."""
+    now = datetime.now(UTC)
+    dead = [sid for sid, s in _TM1_SESS.items()
+            if (now - s["created"]).total_seconds() > _TM1_SESS_TTL_MIN * 60]
+    for sid in dead:
+        _TM1_SESS.pop(sid, None)
+    while len(_TM1_SESS) > _TM1_SESS_MAX:
+        oldest = min(_TM1_SESS, key=lambda k: _TM1_SESS[k]["created"])
+        _TM1_SESS.pop(oldest, None)
+
+
+def _tm1_sess_get(session_id: str) -> dict[str, Any]:
+    _tm1_sess_touch()
+    sess = _TM1_SESS.get(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="tm1 session not found or expired, repeat prepare")
+    return sess
+
+
+class HbTm1PrepareRequest(BaseModel):
+    signal_ids: list[str] = Field(min_length=1, max_length=5000)
+    lookforward: int = Field(default=10000, ge=20, le=100000)
+
+
+class HbTm1RecalcRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    sl_pct: float = Field(default=1.0, ge=0.05, le=10.0)
+    tp_pct: float | None = Field(default=None, ge=0.05, le=50.0)
+    trail_activation_pct: float | None = Field(default=1.0, ge=0.05, le=50.0)
+    trail_distance_pct: float | None = Field(default=1.0, ge=0.05, le=20.0)
+    be_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0)
+    be_lock_pct: float = Field(default=0.1, ge=0.0, le=5.0)
+    partial_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0)
+    partial_close_pct: float | None = Field(default=None, ge=1.0, le=99.0)
+
+    @field_validator("tp_pct", "trail_activation_pct", "trail_distance_pct",
+                     "be_trigger_pct", "partial_trigger_pct", "partial_close_pct",
+                     mode="before")
+    @classmethod
+    def _empty_to_none(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        return v
+
+
+class HbTm1HeatRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    x_key: str = Field(pattern=r"^(sl_pct|tp_pct|trail_activation_pct|trail_distance_pct|be_trigger_pct|be_lock_pct|partial_trigger_pct|partial_close_pct)$")
+    x_from: float = Field(ge=0.0, le=50.0)
+    x_to: float = Field(ge=0.0, le=50.0)
+    x_step: float = Field(ge=0.01, le=25.0)
+    y_key: str = Field(pattern=r"^(sl_pct|tp_pct|trail_activation_pct|trail_distance_pct|be_trigger_pct|be_lock_pct|partial_trigger_pct|partial_close_pct)$")
+    y_from: float = Field(ge=0.0, le=50.0)
+    y_to: float = Field(ge=0.0, le=50.0)
+    y_step: float = Field(ge=0.01, le=25.0)
+    base_params: HbTm1RecalcRequest
+
+
+@app.post("/api/hourbounce/report-tm1/prepare", status_code=202)
+async def tm1_prepare_run(request: HbTm1PrepareRequest) -> dict[str, Any]:
+    global _TM1_PREP_COUNTER
+    _TM1_PREP_COUNTER += 1
+    job_id = f"ptm1_{_TM1_PREP_COUNTER}"
+    _TM1_PREP_JOBS[job_id] = {"status": "pending", "done": 0, "total": len(request.signal_ids),
+                              "current": "", "result": None, "error": None}
+    Thread(target=_run_tm1_prepare, args=(job_id, request.signal_ids, request.lookforward), daemon=True).start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/hourbounce/report-tm1/prepare/status/{job_id}")
+async def tm1_prepare_status(job_id: str) -> dict[str, Any]:
+    job = _TM1_PREP_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {k: v for k, v in job.items() if k != "result"}
+
+
+@app.get("/api/hourbounce/report-tm1/prepare/result/{job_id}")
+async def tm1_prepare_result(job_id: str) -> dict[str, Any]:
+    job = _TM1_PREP_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=409, detail="job not completed yet")
+    return job["result"]
+
+
+def _run_tm1_prepare(job_id: str, signal_ids: list[str], lookforward: int) -> None:
+    """Тяжёлая фаза: M1-окна всех сигналов — в session-cache. Расчёта PnL здесь нет."""
+    global _TM1_SESS_COUNTER
+    from level_tester.infrastructure.hourbounce_store import load_candles_cached
+
+    job = _TM1_PREP_JOBS[job_id]
+    try:
+        job["status"] = "running"
+        arch = _hb_archive_trades(signal_ids)
+        items: list[dict[str, Any]] = []
+        for i, sid in enumerate(signal_ids):
+            job["current"] = sid
+            info = arch.get(sid, {})
+            try:
+                sig_obj, meta, dtp, sig_time, side, _ps = _hb_resolve_signal(sid)
+                created_dt = _hb_parse_time(sig_obj.timestamp)
+                worked_dt = _hb_parse_time(meta.get("touch_ref"))
+                base = {
+                    "signal_id": sid, "symbol": sig_obj.symbol, "side": side,
+                    "level_price": sig_obj.entry_price, "dt_place": dtp,
+                    "sig_time_iso": sig_time.isoformat(),
+                    "created_at": sig_obj.timestamp, "touch_ref": meta.get("touch_ref"),
+                    "created_ts": int(created_dt.timestamp()) if created_dt else None,
+                    "worked_ts": int(worked_dt.timestamp()) if worked_dt else None,
+                    "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
+                    "traded": bool(info.get("traded")),
+                }
+            except Exception as exc:  # noqa: BLE001 - резолв упал: строка с id и текстом ошибки
+                logger.debug("tm1 prepare resolve failed: %s", sid, exc_info=True)
+                items.append({"signal_id": sid, "symbol": "?", "side": "?",
+                              "level_price": None, "dt_place": None, "sig_time_iso": None,
+                              "created_at": None, "touch_ref": None,
+                              "created_ts": None, "worked_ts": None,
+                              "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
+                              "traded": bool(info.get("traded")),
+                              "candles": [], "ncandles": 0, "error": str(exc)[:200]})
+                job["done"] = i + 1
+                continue
+            # Резолв ок — meta уже зафиксирована; падение загрузки свечей
+            # даёт строку с символом/датой (NO_M1 в recalc), а не "?".
+            try:
+                start = sig_time - 30 * timedelta(minutes=1)
+                now = datetime.now(UTC)
+                now_floor = now.replace(second=0, microsecond=0)
+                end = min(sig_time + lookforward * timedelta(minutes=1), now_floor)
+                candles, _stats = load_candles_cached(
+                    session_factory, binance_client, sig_obj.symbol,
+                    start, end, refresh=False, tf="1m")
+            except Exception as exc:  # noqa: BLE001 - без свечей строка остаётся с meta
+                logger.debug("tm1 prepare candles failed: %s", sid, exc_info=True)
+                items.append({**base, "candles": [], "ncandles": 0,
+                              "error": str(exc)[:200]})
+                job["done"] = i + 1
+                continue
+            items.append({**base, "candles": candles, "ncandles": len(candles)})
+            job["done"] = i + 1
+        _tm1_sess_touch()
+        _TM1_SESS_COUNTER += 1
+        session_id = f"tm1s_{_TM1_SESS_COUNTER}"
+        _TM1_SESS[session_id] = {"created": datetime.now(UTC), "items": items,
+                                 "lookforward": lookforward}
+        _tm1_sess_touch()
+        meta_rows = [{k: it[k] for k in ("signal_id", "symbol", "side", "level_price", "dt_place",
+                                        "created_at", "touch_ref", "created_ts", "worked_ts",
+                                        "arch_status", "arch_pnl", "traded", "ncandles", "error")
+                      if k in it} for it in items]
+        job["result"] = {"session_id": session_id, "count": len(items),
+                         "lookforward": lookforward, "rows_meta": meta_rows}
+        job["status"] = "completed"
+    except Exception as exc:  # noqa: BLE001 - граница фонового job
+        job["status"] = "failed"
+        job["error"] = str(exc)[:500]
+
+
+@app.post("/api/hourbounce/report-tm1/recalc")
+async def tm1_recalc(request: HbTm1RecalcRequest) -> dict[str, Any]:
+    """Лёгкая фаза (sync): пересчёт строк по кешированным свечам — для бегунков."""
+    import time as _time
+
+    sess = _tm1_sess_get(request.session_id)
+    t0 = _time.perf_counter()
+    params = {k: getattr(request, k) for k in ("sl_pct", "tp_pct", "trail_activation_pct",
+                                              "trail_distance_pct", "be_trigger_pct", "be_lock_pct",
+                                              "partial_trigger_pct", "partial_close_pct")}
+    rows, footer = _tm1_build_rows(sess["items"], params)
+    kpi = _tm1_kpi(rows)
+    dt_ms = int((_time.perf_counter() - t0) * 1000)
+    return {"columns": [TM1_COLUMN], "rows": rows, "footer": footer,
+            "count": len(rows), "tf": "1m", "entry": "T1M",
+            "params": _tm1_normalize_params(params), "kpi": kpi,
+            "session_id": request.session_id, "recalc_ms": dt_ms}
+
+
+def _tm1_heat_vals(v_from: float, v_to: float, v_step: float) -> list[float]:
+    lo, hi = (v_from, v_to) if v_to >= v_from else (v_to, v_from)
+    out: list[float] = []
+    v = lo
+    while v <= hi + 1e-9 and len(out) < 40:
+        out.append(round(v, 4))
+        v = round(v + v_step, 10)
+    return out or [round(lo, 4)]
+
+
+@app.post("/api/hourbounce/report-tm1/heatmap", status_code=202)
+async def tm1_heat_run(request: HbTm1HeatRequest) -> dict[str, Any]:
+    global _TM1_HEAT_COUNTER
+    _tm1_sess_get(request.session_id)
+    xs = _tm1_heat_vals(request.x_from, request.x_to, request.x_step)
+    ys = _tm1_heat_vals(request.y_from, request.y_to, request.y_step)
+    if len(xs) * len(ys) > 400:
+        raise HTTPException(status_code=422, detail=f"grid too large: {len(xs)}x{len(ys)} > 400, укрупните шаг")
+    if request.x_key == request.y_key:
+        raise HTTPException(status_code=422, detail="x_key and y_key must differ")
+    _TM1_HEAT_COUNTER += 1
+    job_id = f"htm1_{_TM1_HEAT_COUNTER}"
+    _TM1_HEAT_JOBS[job_id] = {"status": "pending", "done": 0, "total": len(xs) * len(ys),
+                              "current": "", "result": None, "error": None,
+                              "x_key": request.x_key, "y_key": request.y_key}
+    payload = request.model_dump()
+    Thread(target=_run_tm1_heat, args=(job_id, payload, xs, ys), daemon=True).start()
+    return {"job_id": job_id, "status": "pending", "nx": len(xs), "ny": len(ys)}
+
+
+@app.get("/api/hourbounce/report-tm1/heatmap/status/{job_id}")
+async def tm1_heat_status(job_id: str) -> dict[str, Any]:
+    job = _TM1_HEAT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {k: v for k, v in job.items() if k != "result"}
+
+
+@app.get("/api/hourbounce/report-tm1/heatmap/result/{job_id}")
+async def tm1_heat_result(job_id: str) -> dict[str, Any]:
+    job = _TM1_HEAT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=409, detail="job not completed yet")
+    return job["result"]
+
+
+def _run_tm1_heat(job_id: str, payload: dict[str, Any], xs: list[float], ys: list[float]) -> None:
+    """Тепловая карта Σ PnL по сетке двух параметров. Свечи берутся из сессии."""
+    job = _TM1_HEAT_JOBS[job_id]
+    try:
+        job["status"] = "running"
+        sess = _tm1_sess_get(payload["session_id"])
+        base = payload["base_params"]
+        grid: list[list[float]] = []
+        best = {"total": None, "x": None, "y": None}
+        done = 0
+        for y in ys:
+            row: list[float] = []
+            for x in xs:
+                job["current"] = f"{payload['x_key']}={x} {payload['y_key']}={y}"
+                p = dict(base)
+                p.pop("session_id", None)
+                p[payload["x_key"]] = x
+                p[payload["y_key"]] = y
+                rows, _footer = _tm1_build_rows(sess["items"], p)
+                total = _tm1_kpi(rows)["total"]
+                row.append(total)
+                if best["total"] is None or total > best["total"]:
+                    best = {"total": total, "x": x, "y": y}
+                done += 1
+                job["done"] = done
+            grid.append(row)
+        job["result"] = {"x_key": payload["x_key"], "y_key": payload["y_key"],
+                         "x_vals": xs, "y_vals": ys, "grid": grid, "best": best,
+                         "session_id": payload["session_id"]}
         job["status"] = "completed"
     except Exception as exc:  # noqa: BLE001 - граница фонового job
         job["status"] = "failed"

@@ -37,10 +37,17 @@ def step_for_tf(tf: str) -> timedelta:
 
 def config_fingerprint(tf: str = "5m", exec_mode: str = "grid") -> str:
     """Отпечаток конфига движка + ТФ + режим: реплеи M1/M5 и grid/grid_be не смешиваются."""
-    from level_tester.backtester.hourbounce import GRID_BE_LOCK_PCT, GRID_BE_TRIGGER_PCT
+    from level_tester.backtester.hourbounce import (
+        ENGINE_VERSION,
+        GRID_BE_LOCK_PCT,
+        GRID_BE_TRIGGER_PCT,
+        MAKER_FEE_PCT,
+        TAKER_FEE_PCT,
+    )
 
     cfg = config_for_tf(validate_tf(tf))
     raw = "|".join([
+        f"v{ENGINE_VERSION}",
         tf,
         exec_mode,
         ",".join(str(s) for s in cfg.sl_sizes),
@@ -50,6 +57,8 @@ def config_fingerprint(tf: str = "5m", exec_mode: str = "grid") -> str:
         str(cfg.life_window_t),
         str(GRID_BE_TRIGGER_PCT),
         str(GRID_BE_LOCK_PCT),
+        str(MAKER_FEE_PCT),
+        str(TAKER_FEE_PCT),
     ])
     return hashlib.sha256(raw.encode()).hexdigest()
 

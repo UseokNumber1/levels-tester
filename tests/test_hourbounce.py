@@ -419,12 +419,62 @@ def test_exec_from_signal_mapping():
 
 def test_cell_pnl_signed_and_zero():
     from level_tester.api.app import _hb_cell_pnl
-    assert _hb_cell_pnl({"outcome": "TAKE", "entry_price": "100", "exit_price": "101"}, "LONG") == 1.0
-    assert _hb_cell_pnl({"outcome": "TAKE", "entry_price": "100", "exit_price": "101"}, "SHORT") == -1.0
-    assert _hb_cell_pnl({"outcome": "STOP", "entry_price": "100", "exit_price": "99.5"}, "LONG") == -0.5
+    # net = gross − комиссии (taker/taker для ячеек без кодов — консервативно)
+    assert _hb_cell_pnl({"outcome": "TAKE", "entry_price": "100", "exit_price": "101"}, "LONG") == 0.8995
+    assert _hb_cell_pnl({"outcome": "TAKE", "entry_price": "100", "exit_price": "101"}, "SHORT") == -1.1005
+    assert _hb_cell_pnl({"outcome": "STOP", "entry_price": "100", "exit_price": "99.5"}, "LONG") == -0.5998
     assert _hb_cell_pnl({"outcome": "NO_ENTRY", "entry_price": None, "exit_price": None}, "LONG") == 0.0
     assert _hb_cell_pnl({"outcome": "TAKE", "entry_price": None, "exit_price": "5"}, "LONG") == 0.0
     assert _hb_cell_pnl({}, "SHORT") == 0.0
+
+
+def test_cell_pnl_maker_taker_mapping():
+    from level_tester.api.app import _hb_cell_pnl
+    # T1L вход (лимитка, maker 0.02) + TP выход (лимит, maker 0.02):
+    # gross 1.0 − (0.02 + 101·0.02/100) = 0.9598
+    assert _hb_cell_pnl(
+        {"outcome": "TAKE", "entry": "T1L", "exit_kind": "tp",
+         "entry_price": "100", "exit_price": "101"}, "LONG") == 0.9598
+    # SHORT T1L+tp 100→99: gross 1.0 − (0.02 + 99·0.02/100) = 0.9602
+    assert _hb_cell_pnl(
+        {"outcome": "TAKE", "entry": "T1L", "exit_kind": "tp",
+         "entry_price": "100", "exit_price": "99"}, "SHORT") == 0.9602
+    # T1M вход (маркет, taker 0.05) + SL выход (стоп-маркет, taker 0.05):
+    # gross −0.5 − (0.05 + 99.5·0.05/100) = −0.5998
+    assert _hb_cell_pnl(
+        {"outcome": "STOP", "entry": "T1M", "exit_kind": "sl",
+         "entry_price": "100", "exit_price": "99.5"}, "LONG") == -0.5998
+    # trail-выход — стоп-маркет (taker), даже после прибыльного движения
+    t2_trail = _hb_cell_pnl(
+        {"outcome": "TAKE", "entry": "T2", "exit_kind": "trail",
+         "entry_price": "100", "exit_price": "101"}, "LONG")
+    assert t2_trail == 0.8995
+
+
+def test_engine_net_pnl_accounts_fees():
+    # T1 LONG без гэпа: вход по level (maker), дальше нужен сценарий с выходом.
+    # Касание i=0 (low<=100, open=101 — гэпа нет: open>level для LONG? нет:
+    # gap = open<level → False → вход по level=100, maker).
+    cs = mk(
+        px=[Decimal("100.5"), Decimal("101.5"), Decimal("102.5")],
+        opens=[Decimal("101"), Decimal("100.5"), Decimal("101.5")],
+        lows=[Decimal("99.9"), Decimal("100.4"), Decimal("101.4")],
+        highs=[Decimal("101.1"), Decimal("101.6"), Decimal("102.6")],
+    )
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1,
+                      config=cfg(life_window_t=10))
+    assert r.entry_price == Decimal("100")
+    assert r.net_pnl_pct is not None and r.gross_pnl_pct is not None and r.fee_pct is not None
+    assert abs(float(r.net_pnl_pct) - (float(r.gross_pnl_pct) - float(r.fee_pct))) < 1e-9
+    # вход maker (0.02) дешевле taker: fee меньше, чем была бы при taker/taker
+    assert float(r.fee_pct) > 0
+    # NO_ENTRY — без комиссий
+    cs2 = mk([Decimal("101"), Decimal("101.5"), Decimal("102")])
+    r2 = review_signal(side="BUY", level_price=Decimal("100"), signal_time=BASE,
+                       candles=cs2, entry_code="T1", sl_index=1)
+    assert r2.outcome == "NO_ENTRY"
+    assert r2.net_pnl_pct is None and r2.fee_pct is None
 
 
 def test_pg_counts_touch_candle_req2():
@@ -544,7 +594,7 @@ def test_grid_be_moves_stop_same_candle_trail_next():
     assert r.outcome == "EXPIRED"  # стоп 100.35 и trail 100.188 не задеты
 
 
-def test_review_matrix_grid_be_has_nine_cells_with_be():
+def test_review_matrix_grid_be_has_twelve_cells_with_be():
     from level_tester.backtester.hourbounce import review_matrix
     cs = mk(
         px=[Decimal("100.2"), Decimal("100.5"), Decimal("101.0"), Decimal("101.0")],
@@ -562,16 +612,19 @@ def test_review_matrix_grid_be_has_nine_cells_with_be():
     kw = dict(side="LONG", level_price=Decimal("100"), signal_time=BASE, candles=cs)
     plain = review_matrix(**kw, exec_mode="grid", m1_candles=m1s)
     be = review_matrix(**kw, exec_mode="grid_be", m1_candles=m1s)
-    assert len(plain) == len(be) == 9
-    assert {r.entry_code for r in plain} == {"T1M", "T2", "T3"}
+    assert len(plain) == len(be) == 12
+    assert {r.entry_code for r in plain} == {"T1M", "T1L", "T2", "T3"}
     assert not any(e.type == "breakeven" for r in plain for e in r.events)
     t1m = [r for r in plain if r.entry_code == "T1M"]
     assert all(r.outcome != "NO_ENTRY" for r in t1m)
+    t1l = [r for r in plain if r.entry_code == "T1L"]
+    assert all(r.outcome != "NO_ENTRY" for r in t1l)
+    assert all(r.entry_price == Decimal("100") for r in t1l)
     t1m_be = next(r for r in be if r.entry_code == "T1M" and r.sl_index == 1)
     assert any(e.type == "breakeven" for e in t1m_be.events)
 
 
-def test_review_matrix_t1m_without_m1_is_no_entry():
+def test_review_matrix_t1x_without_m1_is_no_entry():
     from level_tester.backtester.hourbounce import review_matrix
     cs = mk(
         px=[Decimal("100.2"), Decimal("100.5"), Decimal("100.6")],
@@ -581,9 +634,9 @@ def test_review_matrix_t1m_without_m1_is_no_entry():
     )
     res = review_matrix(side="LONG", level_price=Decimal("100"), signal_time=BASE,
                         candles=cs, exec_mode="grid")
-    t1m = [r for r in res if r.entry_code == "T1M"]
-    assert len(t1m) == 3
-    assert all(r.outcome == "NO_ENTRY" and r.reason == "no_m1" for r in t1m)
+    t1x = [r for r in res if r.entry_code in ("T1M", "T1L")]
+    assert len(t1x) == 6
+    assert all(r.outcome == "NO_ENTRY" and r.reason == "no_m1" for r in t1x)
     # T2/T3 на M5 при этом считаются как раньше
     assert any(r.outcome != "NO_ENTRY" for r in res if r.entry_code == "T2")
 
@@ -767,3 +820,81 @@ def test_t1l_limit_fill_on_return():
     r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
                       candles=m5, entry_code="T1L", sl_index=1, m1_candles=m1s)
     assert r.outcome != "NO_ENTRY" and r.entry_price == Decimal("100")
+
+
+def _t1l_tf_m1s():
+    # касание на m2, прокол SL1 (99.5) на m3: на M1 выход в m3, на M5 — в конце M5-бара
+    return mk1([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.5, 100.6, 100.3, 100.4),
+        (100.4, 100.5, 99.9, 100.1),
+        (100.1, 100.2, 99.4, 99.8),
+        (99.8, 100.0, 99.6, 99.9),
+        (99.9, 100.1, 99.7, 100.0),
+        (100.0, 100.3, 99.9, 100.2),
+        (100.2, 100.5, 100.1, 100.4),
+        (100.4, 100.6, 100.3, 100.5),
+        (100.5, 100.7, 100.4, 100.6),
+    ])
+
+
+def test_t1l_runs_on_selected_tf_1m():
+    # tf=1m: хост и есть минута касания, исполнение поминутно — стоп в m3
+    m1s = _t1l_tf_m1s()
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=m1s, entry_code="T1L", sl_index=1,
+                      m1_candles=m1s, tf="1m")
+    assert r.entry_code == "T1L"
+    assert r.entry_price == Decimal("100")
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_dt == BASE + timedelta(minutes=4)
+
+
+def test_t1l_runs_on_selected_tf_5m():
+    # tf=5m: исполнение на M5 с обрезанной host-свечой — стоп в конце M5-бара
+    m1s = _t1l_tf_m1s()
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=agg5(m1s), entry_code="T1L", sl_index=1,
+                      m1_candles=m1s, tf="5m")
+    assert r.entry_code == "T1L"
+    assert r.entry_price == Decimal("100")
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_dt == BASE + timedelta(minutes=5)
+
+
+def test_review_matrix_t1l_follows_tf():
+    from level_tester.backtester.hourbounce import review_matrix
+    m1s = _t1l_tf_m1s()
+    m1 = review_matrix(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                       candles=m1s, exec_mode="grid", m1_candles=m1s, tf="1m")
+    t1l_1m = next(r for r in m1 if r.entry_code == "T1L" and r.sl_index == 1)
+    assert t1l_1m.exit_dt == BASE + timedelta(minutes=4)
+    m5 = review_matrix(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                       candles=agg5(m1s), exec_mode="grid", m1_candles=m1s, tf="5m")
+    t1l_5m = next(r for r in m5 if r.entry_code == "T1L" and r.sl_index == 1)
+    assert t1l_5m.exit_dt == BASE + timedelta(minutes=5)
+
+
+def test_config_fingerprint_invalidates_legacy_cache():
+    # ENGINE_VERSION входит в отпечаток: кеш, посчитанный до него, не подойдёт
+    import hashlib
+    from level_tester.backtester.hourbounce import (
+        ENGINE_VERSION,
+        GRID_BE_LOCK_PCT,
+        GRID_BE_TRIGGER_PCT,
+        config_for_tf,
+    )
+    from level_tester.infrastructure.hourbounce_store import config_fingerprint
+    cfg = config_for_tf("5m")
+    legacy = hashlib.sha256("|".join([
+        "5m", "grid",
+        ",".join(str(s) for s in cfg.sl_sizes),
+        str(cfg.tp_trail_activate_pct),
+        str(cfg.tp_trail_distance_pct),
+        str(cfg.confirm_window_w),
+        str(cfg.life_window_t),
+        str(GRID_BE_TRIGGER_PCT),
+        str(GRID_BE_LOCK_PCT),
+    ]).encode()).hexdigest()
+    assert isinstance(ENGINE_VERSION, int) and ENGINE_VERSION >= 2
+    assert config_fingerprint("5m") != legacy

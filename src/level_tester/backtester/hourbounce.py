@@ -8,8 +8,10 @@
   сбрасывают счётчик в 0 (confirmation_loop.py:924-929, 968)
 - T1: вход по level, при гэпе — по open; T2/T3: open свечи после 1-й/2-й подтверждающей
 - T0: копия PGv2 req=0 (касание + направленное закрытие, вход по open следующей)
-- T1L: лимитка уже стоит на уровне и заливается сразу в касание — триггер
-  первого M5-касания 1:1 как у T1, вход всегда по level, touch-свеча учитывается
+- T1L: лимитка уже стоит на уровне и заливается сразу в касание — момент
+  заливки задаёт M1-минута касания, исполнение на свечах выбранного ТФ
+  (при tf=5m host-M5 подменяется post-touch M1-диапазоном, при tf=1m хост
+  и есть минута касания), вход всегда по level, touch-свеча учитывается
   только post-touch M1-диапазоном (без lookahead)
 - T1M: маркет на касании — триггер первой M1 low<=level/high>=level, вход по принту
   касания (=level, при гэпе — по open минуты), поиск и исполнение полностью на M1
@@ -88,11 +90,47 @@ def _load_grid_be_params() -> tuple[Decimal, Decimal]:
 
 GRID_BE_TRIGGER_PCT, GRID_BE_LOCK_PCT = _load_grid_be_params()
 
+
+def _load_fee_params() -> tuple[Decimal, Decimal]:
+    """Комиссии maker/taker из config/default.yaml (пользовательские %: 0.02 = 0.02%).
+
+    Fallback — тарифы Binance USDT-M Futures для Regular/VIP0
+    (maker 0.02%, taker 0.05%). Требуется перезапуск сервера после правок файла.
+    """
+    import os
+    from pathlib import Path
+
+    fallback = (Decimal("0.02"), Decimal("0.05"))
+    try:
+        default_path = Path(__file__).resolve().parents[3] / "config" / "default.yaml"
+        cfg_path = Path(os.environ.get("LEVELS_TESTER_CONFIG", str(default_path)))
+        if not cfg_path.is_file():
+            return fallback
+        import yaml
+
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        hb = raw.get("hourbounce", {}) or {}
+        maker = Decimal(str(hb.get("maker_fee_percent", "0.02")))
+        taker = Decimal(str(hb.get("taker_fee_percent", "0.05")))
+        if maker < 0 or taker < 0:
+            return fallback
+        return maker, taker
+    except Exception:
+        return fallback
+
+
+MAKER_FEE_PCT, TAKER_FEE_PCT = _load_fee_params()
+
 # Поддерживаемые ТФ сетки. Окна движка заданы в барах, но семантика —
 # временная (база — M5): confirm_window_w=20 бар M5 = 100 мин.
 # Для M1 количество баров масштабируется, чтобы покрывать то же время.
 TF_STEPS_MIN = {"5m": 5, "1m": 1}
 M5_WINDOW_MIN = 100  # confirm_window_w (20) * 5 мин
+
+# Версия логики движка: входит в отпечаток кеша hb_reviews
+# (config_fingerprint). Поднимать при любом изменении правил входа/исполнения,
+# иначе старые ячейки будут отдаваться как свежие.
+ENGINE_VERSION = 3
 
 
 def validate_tf(tf: str) -> str:
@@ -126,6 +164,7 @@ class ExecParams:
 
     GRID: sl_pct из сетки (0.5/1.0/1.5), трейлинг 1%/1% без BE и фикс-TP.
     SIGNAL (1:1 PGv2): абсолютные SL/TP из архива + BE + трейлинг сигнала.
+    TM1: кастомный набор (стоп/тейк/BE/трейлинг/частичная фиксация) на M1.
     """
 
     sl_price: Decimal | None = None
@@ -137,7 +176,15 @@ class ExecParams:
     trail_distance_pct: Decimal | None = None
     trail_threshold_pct: Decimal | None = None  # None = 0.5 (дефолт PGv2 trade_model)
     trail_tp_only: bool = False
-    sl_source: str = "grid"  # grid | archive | config (откуда взят SL — для честности сверки)
+    sl_source: str = "grid"  # grid | archive | config | tm1 (откуда взят SL — для честности сверки)
+    # Частичная фиксация (TM1): при достижении partial_trigger_pct от входа
+    # закрывается partial_close_pct % позиции по цене триггера; остаток идёт
+    # дальше с тем же SL/BE/трейлингом. Итоговый PnL — взвешенный.
+    partial_trigger_pct: Decimal | None = None  # None = без частички
+    partial_close_pct: Decimal | None = None  # % позиции, 0..100
+    # Фикс-тейк TM1 в % от входа (конвертируется в цену после входа).
+    # Отличие от fixed_tp (абсолютная цена из архива PGv2).
+    tp_pct: Decimal | None = None  # None = без фикс-тейка
 
     @property
     def use_be(self) -> bool:
@@ -146,6 +193,16 @@ class ExecParams:
     @property
     def use_trail(self) -> bool:
         return self.trail_activation_pct is not None and self.trail_distance_pct is not None
+
+    @property
+    def use_partial(self) -> bool:
+        return (
+            self.partial_trigger_pct is not None
+            and self.partial_close_pct is not None
+            and self.partial_trigger_pct > 0
+            and self.partial_close_pct > 0
+            and self.partial_close_pct < 100
+        )
 
 
 def grid_exec(sl_index: int, config: HourBounceConfig = DEFAULT_CONFIG) -> ExecParams:
@@ -170,6 +227,42 @@ def grid_be_exec(sl_index: int, config: HourBounceConfig = DEFAULT_CONFIG) -> Ex
         trail_activation_pct=config.tp_trail_activate_pct,
         trail_distance_pct=config.tp_trail_distance_pct,
         trail_threshold_pct=Decimal("0"),
+    )
+
+
+def tm1_exec(
+    *,
+    sl_pct: Decimal | float | str,
+    tp_pct: Decimal | float | str | None = None,
+    be_trigger_pct: Decimal | float | str | None = None,
+    be_lock_pct: Decimal | float | str | None = None,
+    trail_activation_pct: Decimal | float | str | None = None,
+    trail_distance_pct: Decimal | float | str | None = None,
+    partial_trigger_pct: Decimal | float | str | None = None,
+    partial_close_pct: Decimal | float | str | None = None,
+) -> ExecParams:
+    """Кастомный набор TM1 (всё в % от входа, исполнение на M1).
+
+    Пустые/нулевые значения = механизм выключен. Валидация диапазонов —
+    на стороне API; здесь только нормализация в Decimal/None.
+    """
+    def _pct(v: object) -> Decimal | None:
+        d = _dec(v)
+        if d is None or d <= 0:
+            return None
+        return d
+
+    return ExecParams(
+        sl_pct=_pct(sl_pct),
+        tp_pct=_pct(tp_pct),
+        be_trigger_pct=_pct(be_trigger_pct),
+        be_lock_pct=_dec(be_lock_pct),
+        trail_activation_pct=_pct(trail_activation_pct),
+        trail_distance_pct=_pct(trail_distance_pct),
+        trail_threshold_pct=Decimal("0"),
+        partial_trigger_pct=_pct(partial_trigger_pct),
+        partial_close_pct=_dec(partial_close_pct),
+        sl_source="tm1",
     )
 
 
@@ -266,16 +359,83 @@ class HourBounceResult:
     exit_price: Decimal | None = None
     exit_kind: str | None = None  # sl | trail | tp
     r_multiple: Decimal | None = None
+    gross_pnl_pct: Decimal | None = None  # PnL% без комиссий, со знаком стороны
+    fee_pct: Decimal | None = None  # комиссии входа+выхода в % от входа
+    net_pnl_pct: Decimal | None = None  # gross минус комиссии
     max_profit_pct: Decimal | None = None
     mae_pct: Decimal | None = None
     mfe_pct: Decimal | None = None
     bars_in_trade: int = 0
     events: list[HbEvent] = field(default_factory=list)
     trail_path: list[dict] = field(default_factory=list)  # [{dt, trail}] iso dt
+    partial_dt: datetime | None = None
+    partial_price: Decimal | None = None
 
 
 def _is_long(side: str) -> bool:
     return side.upper() in ("LONG", "BUY")
+
+
+def _entry_fee_pct(entry_code: EntryCode, entry_by_level: bool = False) -> Decimal:
+    """Комиссия входа (пользовательские %): лимитка -> maker, маркет -> taker.
+
+    T1L — заранее выставленная лимитка (заливка по level) -> maker.
+    T1 без гэпа (вход по level) -> maker, T1 с гэпом (вход по open) -> taker.
+    Остальные входы (T1M/T2/T3/PG/T0 — по open/принту) -> taker.
+    """
+    if entry_code == "T1L":
+        return MAKER_FEE_PCT
+    if entry_code == "T1" and entry_by_level:
+        return MAKER_FEE_PCT
+    return TAKER_FEE_PCT
+
+
+def _exit_fee_pct(exit_kind: str | None) -> Decimal:
+    """Комиссия выхода: TP (лимит) -> maker, SL/trail (стоп-маркет) -> taker."""
+    if exit_kind == "tp":
+        return MAKER_FEE_PCT
+    return TAKER_FEE_PCT
+
+
+def _pnl_net(
+    *,
+    is_long: bool,
+    entry_price: Decimal,
+    exit_price: Decimal,
+    entry_fee_pct: Decimal,
+    exit_fee_pct: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Возвращает (gross_pct, fee_pct, net_pct) со знаком стороны.
+
+    Комиссии всегда уменьшают PnL: fee берётся от номинала каждой ноги
+    (entry·fee_entry + exit·fee_exit) и нормируется на вход.
+    """
+    if is_long:
+        gross = (exit_price - entry_price) / entry_price * Decimal(100)
+    else:
+        gross = (entry_price - exit_price) / entry_price * Decimal(100)
+    fee = (entry_price * entry_fee_pct / Decimal(100)
+           + exit_price * exit_fee_pct / Decimal(100)) / entry_price * Decimal(100)
+    return gross, fee, gross - fee
+
+
+def _refix_entry_code(
+    res: HourBounceResult, new_code: EntryCode, is_long: bool,
+) -> HourBounceResult:
+    """Пересчитать комиссии под итоговый код входа после делегирования ветке T1.
+
+    T1M — маркет на касании (вход всегда taker); T1L — лимитка по level
+    (вход всегда maker, вкл. гэп-кейсы: заливка по принту касания).
+    """
+    res.entry_code = new_code  # type: ignore[assignment]
+    if res.entry_price and res.exit_price and res.entry_price > 0:
+        gross, fee, net = _pnl_net(
+            is_long=is_long, entry_price=res.entry_price, exit_price=res.exit_price,
+            entry_fee_pct=_entry_fee_pct(new_code, new_code == "T1L"),
+            exit_fee_pct=_exit_fee_pct(res.exit_kind),
+        )
+        res.gross_pnl_pct, res.fee_pct, res.net_pnl_pct = gross, fee, net
+    return res
 
 
 def review_signal(
@@ -291,6 +451,7 @@ def review_signal(
     pg_required: int | None = None,  # режим сделки PGv2: нужно consecutive, СЧИТАЯ свечу касания
     m1_candles: list[Candle] | None = None,  # минутные свечи того же периода; обязательны для T1M/T1L
     slippage_pct: Decimal | float | str | int = 0,  # проскальзывание входа против трейдера, %
+    tf: str = "5m",  # ТФ основного ряда candles; T1L исполняется на нём, M1 — только клиппинг
 ) -> HourBounceResult:
     # PG-режим (entry_code "PG", как в confirmation_loop.py:875-989):
     # свеча касания сразу проверяется на in_direction и идёт в счётчик.
@@ -298,7 +459,13 @@ def review_signal(
     pg_mode = entry_code == "PG"
     if pg_mode and pg_required is None:
         raise ValueError("PG mode requires pg_required")
+    validate_tf(tf)
     level = Decimal(str(level_price))
+    if level <= 0:
+        # Битый уровень из архива (напр. entry_price=0.0): считать нечего.
+        # Без этого T1L подменял open на 0 через _clip_post_touch и падал
+        # с DivisionUndefined, роняя всю матрицу/строку отчёта.
+        return HourBounceResult(entry_code, sl_index, "NO_ENTRY", reason="bad_level")
     is_long = _is_long(side)
     ex = exec_params if exec_params is not None else grid_exec(sl_index, config)
     slip = _slip_pct(slippage_pct)
@@ -310,13 +477,13 @@ def review_signal(
     if not window:
         return HourBounceResult(entry_code, sl_index, "NO_ENTRY", reason="no_data")
 
-    # T1M/T1L — отдельные M1-ветки (T1 при этом не меняется)
+    # T1M/T1L — отдельные ветки (T1 при этом не меняется)
     if entry_code in ("T1M", "T1L"):
         return _review_t1x(
             entry_code=entry_code, sl_index=sl_index, side=side, level=level,
             is_long=is_long, ex=ex, slip=slip, signal_time=signal_time,
             window=window, m1_candles=m1_candles, config=config,
-            m5_full=candles,
+            window_full=candles, tf=tf,
         )
 
     # 1. touch
@@ -373,6 +540,7 @@ def review_signal(
         )
 
     # 3. entry
+    entry_by_level = False  # True = вход по level (лимитка, maker), иначе по open/принту (taker)
     if entry_code == "T1":
         # гэп: свеча касания открылась ЗА уровнем (цена прошла уровень между
         # свечами) — войти по уровню уже нельзя, вход по open:
@@ -380,6 +548,7 @@ def review_signal(
         # Иначе маркет в момент касания ≈ уровень.
         gap = (touch.open < level) if is_long else (touch.open > level)
         entry_price = touch.open if gap else level
+        entry_by_level = not gap
         if slip:
             entry_price = _with_slip(entry_price, is_long, slip)
         entry_pos = touch_pos
@@ -443,6 +612,27 @@ def review_signal(
     act_price = entry_price * (Decimal(1) + ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and is_long and ex.trail_activation_pct is not None) else (
         entry_price * (Decimal(1) - ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and ex.trail_activation_pct is not None) else None)
     threshold = ex.trail_threshold_pct if ex.trail_threshold_pct is not None else Decimal("0.5")
+    # Фикс-тейк TM1 (% от входа) + архивный абсолютный TP (SIGNAL). TM1-приоритет — tp_pct.
+    tp_price = ex.fixed_tp
+    if ex.tp_pct is not None and ex.tp_pct > 0:
+        tp_price = entry_price * (Decimal(1) + ex.tp_pct / Decimal(100)) if is_long else entry_price * (Decimal(1) - ex.tp_pct / Decimal(100))
+    partial_price_trig = (
+        entry_price * (Decimal(1) + ex.partial_trigger_pct / Decimal(100))
+        if (ex.use_partial and is_long and ex.partial_trigger_pct is not None)
+        else (
+            entry_price * (Decimal(1) - ex.partial_trigger_pct / Decimal(100))
+            if (ex.use_partial and ex.partial_trigger_pct is not None)
+            else None
+        )
+    )
+    partial_frac = (
+        ex.partial_close_pct / Decimal(100)
+        if ex.use_partial and ex.partial_close_pct is not None
+        else None
+    )
+    partial_done = False
+    partial_dt = None
+    partial_px: Decimal | None = None
 
     sl = sl_price
     be_active = False
@@ -495,6 +685,14 @@ def review_signal(
                     be_price = sl
                 be_active = True
                 events.append(HbEvent(4, "breakeven", c.close_time, sl))
+        # 1b. частичная фиксация TM1 (не закрывает сделку, фиксирует долю по триггеру)
+        if ex.use_partial and not partial_done and partial_price_trig is not None:
+            hit_part = (c.high >= partial_price_trig) if is_long else (c.low <= partial_price_trig)
+            if hit_part:
+                partial_done = True
+                partial_dt = c.close_time
+                partial_px = partial_price_trig
+                events.append(HbEvent(4, "partial", c.close_time, partial_price_trig))
         # 2. активация трейлинга (строго после BE, если BE задан)
         if ex.use_trail and not activated and act_price is not None and (not ex.use_be or be_was):
             hit_act = (c.high >= act_price) if is_long else (c.low <= act_price)
@@ -525,10 +723,10 @@ def review_signal(
         if activated and trail is not None and ((is_long and trail > eff) or (not is_long and trail < eff)):
             eff, from_trail = trail, True
         hit_stop = (c.low <= eff) if is_long else (c.high >= eff)
-        check_tp = ex.fixed_tp is not None and not (ex.trail_tp_only and activated)
+        check_tp = tp_price is not None and not (ex.trail_tp_only and activated)
         tp_hit = False
-        if check_tp and ex.fixed_tp is not None:
-            tp_hit = (c.high >= ex.fixed_tp) if is_long else (c.low <= ex.fixed_tp)
+        if check_tp and tp_price is not None:
+            tp_hit = (c.high >= tp_price) if is_long else (c.low <= tp_price)
         if hit_stop:
             if tp_hit:
                 ambiguous = True
@@ -540,16 +738,27 @@ def review_signal(
                 events.append(HbEvent(4, "stop", c.close_time, eff))
             break
         # 6. фикс-TP (после стопа; при trail_tp_only пропускается)
-        if tp_hit and ex.fixed_tp is not None:
-            exit_outcome, exit_kind, exit_dt, exit_price = "TAKE", "tp", c.close_time, ex.fixed_tp
-            events.append(HbEvent(4, "tp", c.close_time, ex.fixed_tp))
+        if tp_hit and tp_price is not None:
+            exit_outcome, exit_kind, exit_dt, exit_price = "TAKE", "tp", c.close_time, tp_price
+            events.append(HbEvent(4, "tp", c.close_time, tp_price))
             break
 
     if exit_outcome == "EXPIRED":
         events.append(HbEvent(4, "expired", exit_dt, exit_price))
 
+    # Взвешенный выход с учётом частички: доля closed — по цене триггера,
+    # остаток — по фактической цене выхода. Стоп/трейлинг/TP остатка не меняются.
+    if partial_done and partial_px is not None and partial_frac is not None:
+        exit_price = partial_frac * partial_px + (Decimal(1) - partial_frac) * exit_price
+
     risk = abs(entry_price - sl_price)
     r_mult = ((exit_price - entry_price) / risk) if (is_long and risk) else ((entry_price - exit_price) / risk) if risk else Decimal(0)
+
+    entry_fee = _entry_fee_pct(entry_code, entry_by_level)
+    gross_pct, fee_pct, net_pct = _pnl_net(
+        is_long=is_long, entry_price=entry_price, exit_price=exit_price,
+        entry_fee_pct=entry_fee, exit_fee_pct=_exit_fee_pct(exit_kind),
+    )
 
     return HourBounceResult(
         entry_code=entry_code, sl_index=sl_index, outcome=exit_outcome,
@@ -560,9 +769,11 @@ def review_signal(
         entry_dt=entry_dt, entry_price=entry_price, sl_price=sl_price,
         be_price=be_price,
         exit_dt=exit_dt, exit_price=exit_price, exit_kind=exit_kind, r_multiple=r_mult,
+        gross_pnl_pct=gross_pct, fee_pct=fee_pct, net_pnl_pct=net_pct,
         max_profit_pct=max_fav, mae_pct=-max_adv, mfe_pct=max_fav,
         bars_in_trade=max(0, len(window) - entry_pos),
         events=events, trail_path=trail_path,
+        partial_dt=partial_dt, partial_price=partial_px,
     )
 
 
@@ -631,17 +842,21 @@ def _review_t1x(
     window: list[Candle],
     m1_candles: list[Candle] | None,
     config: HourBounceConfig,
-    m5_full: list[Candle] | None = None,
+    window_full: list[Candle] | None = None,  # полный ряд основного ТФ (включая свечи до signal_time)
+    tf: str = "5m",  # ТФ основного ряда: исполнение T1L идёт на нём
 ) -> HourBounceResult:
     """T1M/T1L через делегирование проверенной ветке T1 (сам T1 не меняется).
 
     T1M: поиск триггера и всё исполнение на M1 — первая минута low<=level /
     high>=level, вход по принту касания (=level, при гэпе — по open минуты).
-    T1L: лимитка уже стоит на уровне и заливается сразу в касание — триггером
-    служит первое M5-касание (1:1 как у T1, вход всегда по level);
-    host-M5 подменяется post-touch M1-диапазоном от минуты касания, свечи до
-    касания из исполнения исключаются (позиции тогда не было).
+    T1L: лимитка уже стоит на уровне и заливается сразу в касание — момент
+    заливки задаёт M1-минута касания, исполнение идёт на свечах выбранного ТФ
+    (tf): host-свеча основного ТФ, содержащая минуту касания, подменяется
+    post-touch M1-диапазоном от минуты касания (при tf=1m хост и есть минута
+    касания, клиппинг вырожденный), вход всегда по level; свечи основного ТФ
+    до касания из исполнения исключаются (позиции тогда не было).
     """
+    validate_tf(tf)
     new_code = "T1M" if entry_code == "T1M" else "T1L"
     if not m1_candles:
         return HourBounceResult(new_code, sl_index, "NO_ENTRY", reason="no_m1")
@@ -656,33 +871,33 @@ def _review_t1x(
         res = review_signal(
             side=side, level_price=level, signal_time=signal_time, candles=m1w,
             entry_code="T1", sl_index=sl_index, config=cfg, exec_params=ex,
-            slippage_pct=slip,
+            slippage_pct=slip, tf="1m",
         )
-        res.entry_code = new_code  # type: ignore[assignment]
-        return res
+        return _refix_entry_code(res, new_code, is_long)
 
     # T1L: лимитка стоит и заливается в касание — M1-минута касания задаёт
-    # момент заливки; M1 точнее M5 (минута касания может лежать в M5-свече,
-    # открывшейся до signal_time — якорь watch_start режет M5-окно, но не факт
-    # касания). M1 нужна только для минуты касания и клиппинга.
+    # момент заливки; host ищется в свечах основного ТФ (при tf=5m это M5-свеча,
+    # которая может открыться до signal_time — якорь watch_start режет окно,
+    # но не факт касания; при tf=1m хост совпадает с минутой касания).
+    # M1 нужна только для минуты касания и клиппинга.
     touch_min = next(
         (c for c in m1w if (c.low <= level if is_long else c.high >= level)), None)
     if touch_min is None:
-        m5touch = next(
+        wintouch = next(
             (c for c in window if (c.low <= level if is_long else c.high >= level)), None)
         return HourBounceResult(
             new_code, sl_index, "NO_ENTRY",
-            reason="no_m1_touch" if m5touch is not None else "no_touch",
-            touch_dt=m5touch.open_time if m5touch else None,
+            reason="no_m1_touch" if wintouch is not None else "no_touch",
+            touch_dt=wintouch.open_time if wintouch else None,
             events=[HbEvent(1, "no_entry", None, None)],
         )
-    m5src = m5_full if m5_full else window
+    winsrc = window_full if window_full else window
     host_idx = next(
-        (i for i, c in enumerate(m5src)
+        (i for i, c in enumerate(winsrc)
          if c.open_time <= touch_min.open_time < c.close_time), None)
     if host_idx is None:
         return HourBounceResult(new_code, sl_index, "NO_ENTRY", reason="no_host")
-    host = m5src[host_idx]
+    host = winsrc[host_idx]
     post = [c for c in m1w if touch_min.open_time <= c.open_time < host.close_time]
     clipped = _clip_post_touch(host, post, level, is_long, touch_min.open)
     if clipped is None:
@@ -692,15 +907,14 @@ def _review_t1x(
             events=[HbEvent(1, "touch", host.open_time, level)],
         )
     # свечи до касания — до позиции, из исполнения исключаются
-    exec_window = [clipped, *m5src[host_idx + 1:]]
+    exec_window = [clipped, *winsrc[host_idx + 1:]]
     res = review_signal(
         side=side, level_price=level,
         signal_time=min(signal_time, host.open_time), candles=exec_window,
         entry_code="T1", sl_index=sl_index, config=config, exec_params=ex,
-        slippage_pct=slip,
+        slippage_pct=slip, tf=tf,
     )
-    res.entry_code = new_code  # type: ignore[assignment]
-    return res
+    return _refix_entry_code(res, new_code, is_long)
 
 
 ExecMode = Literal["grid", "grid_be"]
@@ -715,20 +929,24 @@ def review_matrix(
     config: HourBounceConfig = DEFAULT_CONFIG,
     exec_mode: ExecMode = "grid",
     m1_candles: list[Candle] | None = None,
+    tf: str = "5m",  # ТФ основного ряда candles; T1L исполняется на нём
 ) -> list[HourBounceResult]:
-    """Матрица 9 ячеек: T1M/T2/T3 × SL1/SL2/SL3.
+    """Матрица 12 ячеек: T1M/T1L/T2/T3 × SL1/SL2/SL3.
 
     T1 (вход по level на M5 с lookahead) из матрицы убран — вместо него T1M
-    (маркет на касании, триггер и исполнение на M1). Без m1_candles ячейки T1M
-    дают NO_ENTRY/no_m1.
+    (маркет на касании, триггер и исполнение на M1) и T1L (заранее
+    выставленная лимитка: заливка в касание по level, исполнение на свечах
+    выбранного ТФ, без lookahead).
+    Без m1_candles ячейки T1M/T1L дают NO_ENTRY/no_m1.
     """
+    validate_tf(tf)
     out: list[HourBounceResult] = []
-    for code in ("T1M", "T2", "T3"):
+    for code in ("T1M", "T1L", "T2", "T3"):
         for sl in (1, 2, 3):
             ex = grid_be_exec(sl, config) if exec_mode == "grid_be" else grid_exec(sl, config)
             out.append(review_signal(
                 side=side, level_price=level_price, signal_time=signal_time,
                 candles=candles, entry_code=code, sl_index=sl, config=config,  # type: ignore[arg-type]
-                exec_params=ex, m1_candles=m1_candles,
+                exec_params=ex, m1_candles=m1_candles, tf=tf,
             ))
     return out

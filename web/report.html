@@ -42,6 +42,7 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <h1>PnL-отчёт: сигналы × входы</h1>
 <span style="color:var(--dim);font-size:12px">клетка = PnL% со знаком стороны · 0 = нет входа · под периодом две строки: Σ PnL и winrate (w/d) · подвал = суммы + winrate по столбцам</span>
 <span style="margin-left:auto"></span>
+<a href="/report-tm1" style="color:#f7c948;font-size:12px;font-weight:700;margin-right:10px">→ TM1 (тип 1 · M1)</a>
 <a href="/hourbounce" style="color:#8ec0ff;font-size:12px">→ Review</a>
 </header>
 <main>
@@ -71,7 +72,7 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <option value="symbol_asc">Монета А→Я</option>
 </select>
 <select id="f-tf" title="Таймфрейм свечей сетки"><option value="5m">M5</option><option value="1m">M1</option></select>
-<label class="chk" title="Добавить 9 колонок Grid+БУ: стоп в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
+<label class="chk" title="Добавить 12 колонок Grid+БУ: стоп в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
 <button class="primary" id="btn-run">Сформировать</button>
 <button class="secondary" id="btn-csv" disabled>Скачать CSV</button>
 </div>
@@ -189,8 +190,9 @@ $('btn-run').onclick = async () => {
     renderTable(data, $('f-group').value);
     $('btn-csv').disabled = false;
     const nTr = data.rows.filter((r) => r.traded).length;
+    const nErr = data.rows.filter((r) => r.error).length;
     const beTxt = data.with_be && data.be_params ? ` · Grid+БУ ${data.be_params.trigger_pct}/${data.be_params.lock_pct}` : '';
-    $('status').textContent = `Готово [${(data.tf || tf).toUpperCase()}${beTxt}]: ${data.count} сигналов (из них отторговано в БД: ${nTr}). Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
+    $('status').textContent = `Готово [${(data.tf || tf).toUpperCase()}${beTxt}]: ${data.count} сигналов (из них отторговано в БД: ${nTr})${nErr ? ` · ОШИБОК: ${nErr} (наведите на красный бейдж в строке)` : ''}. Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
   } catch (e) {
     $('status').textContent = 'Ошибка: ' + e.message;
   } finally {
@@ -316,8 +318,11 @@ function renderTable(data, groupMode) {
       const archTxt = r.traded
         ? `${r.arch_status || ''} ${r.arch_pnl != null ? `${Number(r.arch_pnl) > 0 ? '+' : ''}${Number(r.arch_pnl).toFixed(2)}%` : ''}`
         : '—';
-      h += `<tr${r.traded ? ' class="traded"' : ''}><td title="${r.signal_id}">${r.traded ? '<span class="trdot" title="Отторговано в БД"></span>' : ''}${r.symbol} · ${r.side} · ${r.level_price} · ${(r.dt_place || '').slice(0, 16)}</td>`;
-      h += `<td class="${r.traded ? 'pos' : 'zero'}" title="${r.traded ? `Реальная сделка: ${r.arch_status}` : 'В архиве нет закрытой сделки'}">${archTxt}</td>`;
+      const archPnl = r.arch_pnl != null ? Number(r.arch_pnl) : null;
+      const archCls = !r.traded ? 'zero' : (archPnl != null && Number.isFinite(archPnl) ? (archPnl > 0 ? 'pos' : archPnl < 0 ? 'neg' : 'zero') : 'pos');
+      const errBadge = r.error ? `<span style="display:inline-block;background:#ef5350;color:#fff;font-weight:700;border-radius:8px;padding:0 6px;margin-right:6px;font-size:10px;" title="Ошибка расчёта: ${(r.error || '').replace(/"/g, '&quot;')}">ERROR</span>` : '';
+      h += `<tr${r.traded ? ' class="traded"' : ''}><td title="${r.error ? `ОШИБКА: ${r.error} · ` : ''}${r.signal_id}">${errBadge}${r.traded ? '<span class="trdot" title="Отторговано в БД"></span>' : ''}${r.symbol} · ${r.side} · ${r.level_price} · ${(r.dt_place || '').slice(0, 16)}</td>`;
+      h += `<td class="${archCls}" title="${r.traded ? `Реальная сделка: ${r.arch_status}` : 'В архиве нет закрытой сделки'}">${archTxt}</td>`;
       let bestCol = '—', bestV = -Infinity;
       const vals = {};
       for (const c of cols) {
@@ -398,15 +403,15 @@ $('btn-csv').onclick = () => {
     const anyTrade = cols.some((c) => Number(((r.cells || {})[c] || {}).pnl));
     return anyTrade ? [bc, (bv > 0 ? '+' : '') + bv.toFixed(2)] : ['—', ''];
   };
-  const lines = [['signal', 'symbol', 'side', 'level', 'dt_place', 'traded', 'arch_status', 'arch_pnl', ...cols, 'best_variant', 'best_pnl'].join(';')];
+  const lines = [['signal', 'symbol', 'side', 'level', 'dt_place', 'traded', 'arch_status', 'arch_pnl', ...cols, 'best_variant', 'best_pnl', 'error'].join(';')];
   for (const r of sortedRows(lastData.rows)) {
     const [bcol, bpnl] = bestOf(r);
     lines.push([r.signal_id, r.symbol, r.side, r.level_price, r.dt_place,
       r.traded ? '1' : '0', r.arch_status || '', r.arch_pnl != null ? String(r.arch_pnl).replace('.', ',') : '',
       ...cols.map((c) => String(Number(((r.cells || {})[c] || {}).pnl) || 0).replace('.', ',')),
-      bcol, bpnl.replace('.', ',')].join(';'));
+      bcol, bpnl.replace('.', ','), (r.error || '').replace(/;/g, ',')].join(';'));
   }
-  lines.push(['TOTAL', '', '', '', '', '', '', '', ...cols.map((c) => String(Number((lastData.footer || {})[c]) || 0).replace('.', ',')), String(lastData.footer.TOTAL).replace('.', ',')].join(';'));
+  lines.push(['TOTAL', '', '', '', '', '', '', '', ...cols.map((c) => String(Number((lastData.footer || {})[c]) || 0).replace('.', ',')), String(lastData.footer.TOTAL).replace('.', ','), ''].join(';'));
   const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

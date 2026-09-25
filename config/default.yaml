@@ -83,3 +83,8 @@ hourbounce:
   # Требуется перезапуск сервера после правок.
   grid_be_trigger_pct: 0.9
   grid_be_lock_pct: 0.35
+  # Комиссии Binance USDT-M Futures (VIP0/Regular, пользовательские %: 0.02 = 0.02%).
+  # maker — лимитные заявки (вход T1L, выход TP); taker — маркет/стоп (вход T1M/T2/T3, выход SL/trail).
+  # Скидка 10% за оплату BNB не применяется. Требуется перезапуск сервера после правок.
+  maker_fee_percent: 0.02
+  taker_fee_percent: 0.05

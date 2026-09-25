@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.4.0 (2026-09-25)
+
+### Added
+- **T1L entry mode** (`src/level_tester/backtester/hourbounce.py`, `src/level_tester/api/app.py`, `web/hourbounce.html`, `web/hourbounce.js`): Pre-placed limit order filled at touch (no lookahead), execution on selectable TF (M1/M5). Matrix expanded from 9 to 12 cells (T1M/T1L/T2/T3 × SL1/SL2/SL3).
+- **Maker/taker fee accounting** (`src/level_tester/backtester/hourbounce.py`, `src/level_tester/api/app.py`): Net PnL = gross − fees. Entry T1L (limit) = maker, other entries = taker; TP exit (limit) = maker, SL/trail exits = taker. HourBounceResult gains `gross_pnl_pct`, `fee_pct`, `net_pnl_pct`.
+- **Partial close (TM1)** (`src/level_tester/backtester/hourbounce.py`): Configurable trigger % and close % of position; executed as limit at trigger price on same candle.
+- **TM1 Report API & UI** (`src/level_tester/api/app.py`, `web/report_tm1.html`): Dedicated report for T1M (market-on-touch on M1) with custom ExecParams per run. Two-phase execution: heavy `prepare` (loads M1 windows once into session cache) + light `recalc` (re-computes from cache for slider-driven params). Includes `heatmap` endpoint for 2D parameter sweeps (Σ PnL grid).
+- **TF parameter for execution** (`src/level_tester/backtester/hourbounce.py`): `tf` arg ("1m"|"5m") selects base timeframe for T1L and T2/T3 execution; T1M always uses M1.
+
+### Changed
+- **Matrix cache invalidation** (`src/level_tester/infrastructure/hourbounce_store.py`): `config_fingerprint` now includes `ENGINE_VERSION` (v2+) and fee constants (`MAKER_FEE_PCT`, `TAKER_FEE_PCT`) to invalidate legacy caches.
+- **PnL Report** (`src/level_tester/api/app.py`, `web/report.html`): Columns expanded to 12 base (T1M/T1L/T2/T3 × SL1..3); TF selector (M5/M1); error badges on failed cells; CSV exports `error` column.
+- **HourBounce Review UI** (`web/hourbounce.html`, `web/hourbounce.js`): Added T1L tab; matrix badge shows "12 комбинаций"; header links to TM1 report.
+- **Net PnL in matrix cells** (`src/level_tester/api/app.py`): `_hb_cell_pnl` now returns net PnL (gross − maker/taker fees) instead of gross.
+
+### Fixed
+- **T1L zero-level guard** (`src/level_tester/backtester/hourbounce.py`): Bad levels (`level <= 0`) return `NO_ENTRY/bad_level` instead of `DivisionUndefined`.
+- **Cache hit validation** (`src/level_tester/api/app.py`): `_hb_build_matrix` validates cached cell count (12) and entry set ({T1M,T1L,T2,T3}); T1M/T1L always recomputed fresh over M1 candles.
+
+### Tests
+- Added 6 tests in `tests/test_hourbounce.py`:
+  - `test_cell_pnl_maker_taker_mapping` — fee logic per entry/exit kind
+  - `test_engine_net_pnl_accounts_fees` — net = gross − fees, NO_ENTRY has no fees
+  - `test_t1l_runs_on_selected_tf_1m` / `test_t1l_runs_on_selected_tf_5m` — TF selection
+  - `test_review_matrix_t1l_follows_tf` — matrix T1L respects TF
+  - `test_config_fingerprint_invalidates_legacy_cache` — ENGINE_VERSION + fees in fingerprint
+
 ## v1.3.2 (2026-09-21)
 
 ### Fixed

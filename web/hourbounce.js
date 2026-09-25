@@ -219,7 +219,7 @@ function setTabs() {
 function updateTfLabels() {
   const lbl = tfLabel();
   const hs = $('head-sub');
-  if (hs) hs.textContent = `архив PGv2 · ${lbl} · T1M/T2/T3 × SL 0.5/1.0/1.5`;
+  if (hs) hs.textContent = `архив PGv2 · ${lbl} · T1M/T1L/T2/T3 × SL 0.5/1.0/1.5`;
 }
 
 function ensureChart() {
@@ -452,7 +452,7 @@ async function loadMatrix() {
   if (!state.sel) return;
   const s = state.sel;
   const seq = ++state.matrixSeq;
-  $('res-line').textContent = `${s.symbol} · матрица 9 комбинаций — загрузка...`;
+  $('res-line').textContent = `${s.symbol} · матрица 12 комбинаций — загрузка...`;
   $('banner').classList.remove('on');
   const rf = state.forceRefresh ? '&refresh=1' : '';
   state.forceRefresh = false;
@@ -504,7 +504,7 @@ async function loadMatrix() {
     <span>${d.cache && d.cache.cells_hit ? 'из кеша' : 'посчитано'} · свечей из кеша <b>${(d.cache && d.cache.candles_cached) ?? '—'}</b></span>
     <span>окно: от выставления до ближайшей отработки · всё время UTC</span>`;
   $('res-badge').textContent = `${counts.TAKE}T / ${counts.STOP}S / ${counts.NO_ENTRY}NE`;
-  $('res-line').textContent = `${s.symbol} · ${s.side} · level ${s.level_price} · ${tfLabel()} · 9 комбинаций · touch PGv2 ${shortDt(d.signal.touch_ref)}`;
+  $('res-line').textContent = `${s.symbol} · ${s.side} · level ${s.level_price} · ${tfLabel()} · 12 комбинаций · touch PGv2 ${shortDt(d.signal.touch_ref)}`;
 
   box.appendChild(document.createElement('div'));
   const slSizes = d.sl_sizes || ['0.5', '1.0', '1.5'];
@@ -514,9 +514,9 @@ async function loadMatrix() {
     el.textContent = `SL${sl} · ${slSizes[sl - 1]}%`;
     box.appendChild(el);
   });
-  const labels = { T1M: 'T1M · маркет M1', T2: 'T2 · 1 бар', T3: 'T3 · 2 бара' };
+  const labels = { T1M: 'T1M · маркет M1', T1L: 'T1L · лимит M1', T2: 'T2 · 1 бар', T3: 'T3 · 2 бара' };
   let syncing = false;
-  ['T1M', 'T2', 'T3'].forEach((code) => {
+  ['T1M', 'T1L', 'T2', 'T3'].forEach((code) => {
     const rh = document.createElement('div');
     rh.className = 'rowh';
     rh.textContent = labels[code];
