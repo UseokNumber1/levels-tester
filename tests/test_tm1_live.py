@@ -209,6 +209,86 @@ def test_recalc_carries_detail_fields() -> None:
         _app._TM1_SESS.pop("t-test", None)
 
 
+def test_r2_matches_js_math_round() -> None:
+    """Копейки сервера = Math.round клиента (half-up к +∞).
+
+    Python round() — банковский и на границе x.xx5 даёт другую копейку
+    (round(-4.995, 2) == -5.0, а Math.round — -4.99): футер сервера
+    расходился бы с пересчётом таблицы/графика в браузере.
+    """
+    import math
+
+    from level_tester.api.app import _r1, _r2, _r3
+
+    assert _r2(-4.995) == -4.99
+    assert _r2(-4.995) != round(-4.995, 2)
+    assert _r2(2.345) == math.floor(2.345 * 100 + 0.5) / 100
+    assert _r2(0.005) == 0.01 and _r2(-0.005) == 0.0
+    assert _r1(55.55) == 55.6 and _r3(0.1235) == 0.124
+    # Побитовое совпадение с эталоном Math.round на случайных значениях.
+    import random
+
+    random.seed(7)
+    for v in [random.uniform(-5, 5) for _ in range(5000)]:
+        assert _r2(v) == math.floor(float(v) * 100 + 0.5) / 100
+
+
+def _kpi_rows(pnls: list[float]) -> list[dict]:
+    rows = []
+    for i, p in enumerate(pnls):
+        rows.append({
+            "signal_id": f"s{i:02d}", "symbol": "TST", "side": "LONG",
+            "level_price": "100", "dt_place": f"2025-01-{10 + i:02d} 10:00:00",
+            "cells": {TM1_COLUMN: {
+                "pnl": p, "outcome": "TAKE" if p > 0 else ("STOP" if p < 0 else "NO_ENTRY"),
+                "exit_kind": "trail", "events": [], "r_multiple": None,
+                "has_partial": False, "has_be": False}},
+            "row_total": p, "best_pnl": p, "pg_pnl": 0.0, "pg_outcome": "NO_ENTRY",
+        })
+    return rows
+
+
+def test_kpi_total_equity_footer_parity() -> None:
+    """TOTAL == конец equity == итеративная half-up сумма (как футер/клиент).
+
+    Граничные копейки x.xx5 в выборке: наивная банковская сумма дала бы
+    другое число, чем график и таблица.
+    """
+    import math
+
+    pnls = [2.345, -4.995, 1.005, 0.0, -1.005, 3.335, -2.675, 0.125, -0.125, 1.255]
+    kpi = _tm1_kpi(_kpi_rows(pnls))
+    assert kpi["equity"], "equity обязана строиться"
+    assert kpi["total"] == kpi["equity"][-1]
+    # Независимый пересчёт клиентской формулой (Math.round итеративно).
+    run = 0.0
+    for v in pnls:  # dt_place идут по порядку списка — тот же порядок, что в KPI
+        run = math.floor((run + math.floor(v * 100 + 0.5) / 100) * 100 + 0.5) / 100
+    assert kpi["total"] == run
+    # Банковский вариант на этой выборке даёт другое число (-0.74 вместо -0.71):
+    # тест чувствителен именно к half-up.
+    assert round(sum(round(v, 2) for v in pnls), 2) != kpi["total"]
+
+
+def test_kpi_ev_matches_client_formula() -> None:
+    """EV сервера = формула fmtEVcell клиента на сырых клетках (wr*avg_win+(1-wr)*avg_loss)."""
+    import math
+
+    from level_tester.api.app import _r3
+
+    pnls = [2.345, -4.995, 1.005, -1.005, 3.335, -2.675, 1.255, -0.575]
+    kpi = _tm1_kpi(_kpi_rows(pnls))
+    dec = [v for v in pnls if v != 0]
+    w = [v for v in dec if v > 0]
+    sw = sum(w)
+    sl = sum(v for v in dec if v <= 0)
+    aw = sw / len(w)
+    al = sl / (len(dec) - len(w))
+    ev = (len(w) / len(dec)) * aw + ((len(dec) - len(w)) / len(dec)) * al
+    assert kpi["expectancy"] == _r3(ev) == _r3(math.floor(ev * 1000 + 0.5) / 1000)
+    assert kpi["wins"] == len(w) and kpi["decided"] == len(dec)
+
+
 def test_build_rows_and_kpi() -> None:
     m1 = _mk([
         (101, 101.2, 100.9, 101.0), (100.5, 100.8, 99.9, 100.2),

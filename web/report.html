@@ -72,14 +72,14 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <option value="symbol_asc">Монета А→Я</option>
 </select>
 <select id="f-tf" title="Таймфрейм свечей сетки"><option value="5m">M5</option><option value="1m">M1</option></select>
-<label class="chk" title="Добавить 12 колонок Grid+БУ: стоп в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
+<label class="chk" title="Добавить 12 колонок +БУ: тот же live-движок (TP 5.0, trail 1.6/0.6 thr 0.1, partial 0.8/50), но со стопом в безубыток (триггер/лок из config/default.yaml → hourbounce), трейлинг строго после БУ"><input type="checkbox" id="f-be"> + Grid+БУ</label>
 <button class="primary" id="btn-run">Сформировать</button>
 <button class="secondary" id="btn-csv" disabled>Скачать CSV</button>
 </div>
 <div class="progress" id="prog"><div id="prog-fill" style="width:0%"></div></div>
 <div id="status">Загрузи список и нажми «Сформировать». Первый прогон тянет свечи с Binance, повторный — из кеша.</div>
 <div class="wrap" id="wrap" style="display:none"><table id="tbl"></table></div>
-<div class="hint">EXPIRED считается по последней цене (вход был, выхода нет). Наведи на клетку — увидишь исход (TAKE/STOP/NO_ENTRY/EXPIRED). Базовые колонки — голый трейлинг 1%/1% без БУ; «+ Grid+БУ» — стоп в безубыток из конфига, трейлинг строго после БУ.</div>
+<div class="hint">EXPIRED считается по последней цене (вход был, выхода нет). Наведи на клетку — увидишь исход (TAKE/STOP/NO_ENTRY/EXPIRED). Единый live-движок для всех колонок и графиков (порядок в свече: БУ → частичка → трейлинг строго после БУ → стоп → фикс-TP 5%): базовые колонки — live без БУ, «+ Grid+БУ» — live с БУ 0.8/0.35; трейлинг 1.6/0.6 (порог 0.1%), частичка 0.8/50. PG — тот же движок на архивных параметрах (эталон 1:1).</div>
 </main>
 <script>
 'use strict';

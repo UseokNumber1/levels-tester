@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.5.0 (2026-09-29)
+
+### Changed
+- **Унифицированный live-движок отчёта** (`src/level_tester/backtester/hourbounce.py`, `ENGINE_VERSION` 6 → 7, `src/level_tester/api/app.py`, `config/default.yaml`, `web/report.html`): все колонки PnL-отчёта (`T1M/T1L/T2/T3 × SL`, базовые и `+БУ`) и графики (Σ, winrate, EV) работают на одном правильном алгоритме — `review_signal` (порядок v5 в свече) + live-набор PGv2 (TP 5.0, trail 1.6/0.6 thr 0.1, partial 0.8/50, комиссии maker 0.02/taker 0.05). `grid_exec`/`grid_be_exec` собраны на `tm1_exec` и различаются только флагом БУ (0.8/0.35 из конфига, было 0.9/0.35); старый голый трейлинг 1%/1% без TP/частички убран. PG-колонка — тот же движок на архивных параметрах (эталон 1:1). Удалён второй путь расчёта T1M/T1L в `_run_hb_report` (fallback давал расхождения «разных движков»); единый источник ячеек — матрица. Старый кеш `hb_reviews` инвалидируется версией движка. Меняются только входные данные (entry/SL/BE-флаг) и ТФ.
+
+### Tests
+- Обновлены `test_grid_be_exec_params_from_config`, `test_grid_be_moves_stop_same_candle_trail_next`, `test_review_matrix_grid_be_has_twelve_cells_with_be` под live-набор + добавлен паритет base/+БУ (все поля кроме BE совпадают) и проверка net-PnL во всех ячейках матрицы; механика v5/гэпа/спайка изолирована явными `ExecParams` (не зависит от дефолтов отчёта).
+
+### Fixed
+- **Паритет графиков и таблиц** (`web/hourbounce.js`, `src/level_tester/api/app.py`): фолбэк `cellPnlPct` считал голый гросс без комиссий (до 0.1% мимо net отчёта) — теперь net по формуле `_hb_cell_pnl` (T1L-вход/TP-выход maker 0.02, остальное taker 0.05); best-подсветка матрицы брала max гросса только по TAKE/STOP — теперь max net по всем решённым (как `best_variant` отчёта); winrate агрегата `TAKE/9` заменён на WR отчёта `wins/decided` по net (знаменатель 12, а не 9).
+- **Копейка футер/equity/KPI** (`src/level_tester/api/app.py`): Python `round()` — банковский, на границе `x.xx5` давал другую копейку, чем `Math.round` клиента (`round(-4.995,2) == -5.0` против `-4.99`; ~1.2% значений) — все 2/3/1-зн. округления отчётов переведены на `_r2/_r3/_r1` (те же double-операции, что в JS, — побитово тот же результат); футер TM1 копится в порядке equity, `TOTAL == kpi.total == конец equity`; EV считается из сырых сумм без промежуточных округлений (как `fmtEVcell` клиента).
+
+### Tests
+- Новые `test_r2_matches_js_math_round`, `test_kpi_total_equity_footer_parity`, `test_kpi_ev_matches_client_formula` в `tests/test_tm1_live.py` (half-up граница, TOTAL==equity[-1], EV==формуле клиента).
+
 ## v1.4.1 (2026-09-29)
 
 ### Fixed

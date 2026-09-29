@@ -82,6 +82,8 @@ def test_trail_activation_then_stop_same_candle_pg_order():
     # Порядок PGv2 (trade_model): активация трейлинга и проверка стопа —
     # в одной свече. Вход 101, свеча входа дотянулась до +1% (high 102.2),
     # trail встал на 101.178, low 100.9 его пробил -> TAKE по трейлингу.
+    # Явный ExecParams: механика движка, не live-набор отчёта (trail 1.6%).
+    from level_tester.backtester.hourbounce import ExecParams
     cs = mk(
         px=[Decimal("101"), Decimal("100.2"), Decimal("102.5"), Decimal("100.0")],
         opens=[Decimal("102"), Decimal("101.5"), Decimal("100.2"), Decimal("102.5")],
@@ -90,8 +92,12 @@ def test_trail_activation_then_stop_same_candle_pg_order():
     )
     r = review_signal(side="BUY", level_price=Decimal("101"), signal_time=BASE,
                       candles=cs, entry_code="T1", sl_index=1,
-                      config=cfg(tp_trail_activate_pct=Decimal("1.0"),
-                                 tp_trail_distance_pct=Decimal("1.0"), life_window_t=10))
+                      config=cfg(life_window_t=10),
+                      exec_params=ExecParams(
+                          sl_pct=Decimal("0.5"),
+                          trail_activation_pct=Decimal("1.0"),
+                          trail_distance_pct=Decimal("1.0"),
+                          trail_threshold_pct=Decimal("0")))
     assert r.outcome == "TAKE" and r.exit_kind == "trail"
     assert r.exit_price == Decimal("101.178")
     assert any(e.type == "trail_on" for e in r.events)
@@ -114,7 +120,10 @@ def test_trail_activates_by_high_triggers_next_bar_only():
 
 
 def test_gap_through_trail_take_by_open_and_gap_through_stop():
-    # гэп вниз через стоп на следующей свече после входа -> STOP по open
+    # гэп вниз через стоп на следующей свече после входа -> STOP по open.
+    # Явный ExecParams без частички: механика гэпа, не live-набор
+    # (с частичкой 0.8/50 выход был бы взвешенным 99.9040).
+    from level_tester.backtester.hourbounce import ExecParams
     cs = mk(
         px=[Decimal("101"), Decimal("101.7"), Decimal("97.95")],
         opens=[Decimal("102"), Decimal("101.8"), Decimal("98.0")],
@@ -122,7 +131,8 @@ def test_gap_through_trail_take_by_open_and_gap_through_stop():
         highs=[Decimal("102.0"), Decimal("102.0"), Decimal("98.1")],
     )
     r = review_signal(side="BUY", level_price=Decimal("101"), signal_time=BASE,
-                      candles=cs, entry_code="T1", sl_index=3, config=cfg(life_window_t=10))
+                      candles=cs, entry_code="T1", sl_index=3, config=cfg(life_window_t=10),
+                      exec_params=ExecParams(sl_pct=Decimal("1.5")))
     assert r.outcome == "STOP" and r.exit_price == Decimal("98.0")
 
 
@@ -744,29 +754,43 @@ def test_deterministic_replay():
 
 
 def test_grid_be_exec_params_from_config():
+    # Унифицированный live-движок: grid/grid_be различаются только флагом BE,
+    # остальное — живой набор PGv2 (TP 5.0, trail 1.6/0.6 thr 0.1, partial 0.8/50).
     from level_tester.backtester.hourbounce import (
         GRID_BE_LOCK_PCT,
         GRID_BE_TRIGGER_PCT,
         grid_be_exec,
+        grid_exec,
     )
-    assert (GRID_BE_TRIGGER_PCT, GRID_BE_LOCK_PCT) == (Decimal("0.9"), Decimal("0.35"))
+    assert (GRID_BE_TRIGGER_PCT, GRID_BE_LOCK_PCT) == (Decimal("0.8"), Decimal("0.35"))
     ex = grid_be_exec(2)
     assert ex.sl_pct == Decimal("1.0")
-    assert ex.be_trigger_pct == Decimal("0.9") and ex.be_lock_pct == Decimal("0.35")
-    assert ex.use_be and ex.use_trail
-    assert ex.trail_activation_pct == Decimal("1.0") and ex.trail_distance_pct == Decimal("1.0")
+    assert ex.be_trigger_pct == Decimal("0.8") and ex.be_lock_pct == Decimal("0.35")
+    assert ex.use_be and ex.use_trail and ex.use_partial
+    assert ex.trail_activation_pct == Decimal("1.6") and ex.trail_distance_pct == Decimal("0.6")
+    assert ex.trail_threshold_pct == Decimal("0.1")
+    assert ex.tp_pct == Decimal("5.0")
+    assert ex.partial_trigger_pct == Decimal("0.8") and ex.partial_close_pct == Decimal("50.0")
+    base = grid_exec(2)
+    assert not base.use_be
+    assert (base.sl_pct, base.tp_pct, base.trail_activation_pct, base.trail_distance_pct,
+            base.trail_threshold_pct, base.partial_trigger_pct, base.partial_close_pct) == (
+        ex.sl_pct, ex.tp_pct, ex.trail_activation_pct, ex.trail_distance_pct,
+        ex.trail_threshold_pct, ex.partial_trigger_pct, ex.partial_close_pct)
 
 
 def test_grid_be_moves_stop_same_candle_trail_next():
-    # Grid+БУ LONG: свеча 1 бьёт БУ-триггер 0.9% (стоп -> 100.35 в той же свече),
+    # Grid+БУ LONG: свеча 1 бьёт БУ-триггер 0.8% (стоп -> 100.35 в той же свече),
     # но трейлинг в той же свече заблокирован гейтом; свеча 2 бьёт активацию
-    # 1.0% -> trail_on. Порядок как в проде PGv2.
+    # 1.6% -> trail_on. Порядок как в проде PGv2.
     from level_tester.backtester.hourbounce import grid_be_exec
+    # Последняя свеча открыта выше trail ~101.09 с low выше него:
+    # гэпа через trail нет, пуллбэка нет — EXPIRED.
     cs = mk(
-        px=[Decimal("100.2"), Decimal("100.6"), Decimal("101.0"), Decimal("101.0")],
-        opens=[Decimal("100.5"), Decimal("100.4"), Decimal("100.5"), Decimal("101.0")],
-        lows=[Decimal("99.9"), Decimal("100.38"), Decimal("100.5"), Decimal("100.9")],
-        highs=[Decimal("100.6"), Decimal("100.95"), Decimal("101.2"), Decimal("101.1")],
+        px=[Decimal("100.2"), Decimal("100.6"), Decimal("101.0"), Decimal("101.2")],
+        opens=[Decimal("100.5"), Decimal("100.4"), Decimal("100.5"), Decimal("101.2")],
+        lows=[Decimal("99.9"), Decimal("100.38"), Decimal("100.5"), Decimal("101.1")],
+        highs=[Decimal("100.6"), Decimal("100.95"), Decimal("101.7"), Decimal("101.3")],
     )
     ex = grid_be_exec(1)
     r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
@@ -776,7 +800,8 @@ def test_grid_be_moves_stop_same_candle_trail_next():
     assert len(be) == 1 and be[0].dt == cs[1].close_time
     assert r.be_price == Decimal("100.35")
     assert len(tr) == 1 and tr[0].dt == cs[2].close_time
-    assert r.outcome == "EXPIRED"  # стоп 100.35 и trail 100.188 не задеты
+    assert any(e.type == "partial" for e in r.events)  # live-набор включает частичку 0.8/50
+    assert r.outcome == "EXPIRED"  # стоп 100.35 и trail ~101.09 не задеты (пуллбэк-правило)
 
 
 def test_review_matrix_grid_be_has_twelve_cells_with_be():
@@ -800,6 +825,8 @@ def test_review_matrix_grid_be_has_twelve_cells_with_be():
     assert len(plain) == len(be) == 12
     assert {r.entry_code for r in plain} == {"T1M", "T1L", "T2", "T3"}
     assert not any(e.type == "breakeven" for r in plain for e in r.events)
+    # Унифицированный движок: частичка live-набора есть в обеих матрицах,
+    # BE — только в grid_be; net-PnL считается везде через gross−fees.
     t1m = [r for r in plain if r.entry_code == "T1M"]
     assert all(r.outcome != "NO_ENTRY" for r in t1m)
     t1l = [r for r in plain if r.entry_code == "T1L"]
@@ -807,6 +834,14 @@ def test_review_matrix_grid_be_has_twelve_cells_with_be():
     assert all(r.entry_price == Decimal("100") for r in t1l)
     t1m_be = next(r for r in be if r.entry_code == "T1M" and r.sl_index == 1)
     assert any(e.type == "breakeven" for e in t1m_be.events)
+    # Паритет унифицированного движка: T1M plain несёт частичку live-набора,
+    # net-PnL определён везде, где есть вход и выход.
+    t1m_plain = next(r for r in plain if r.entry_code == "T1M" and r.sl_index == 1)
+    assert any(e.type == "partial" for e in t1m_plain.events)
+    assert any(e.type == "partial" for e in t1m_be.events)
+    for r in (*plain, *be):
+        if r.entry_price and r.exit_price:
+            assert r.net_pnl_pct is not None and r.gross_pnl_pct is not None
 
 
 def test_review_matrix_t1x_without_m1_is_no_entry():
@@ -920,9 +955,10 @@ def test_t1m_slippage_against_trader():
 
 
 def test_t1l_clips_pretouch_spike():
-    # спайк 101.5 до касания: T1 берёт фантомный trail, T1L — только post-touch
+    # спайк 101.8 до касания (выше live-активации 101.6):
+    # T1 берёт фантомный trail, T1L — только post-touch
     m1s = mk1([
-        (100.5, 101.5, 100.4, 101.3),
+        (100.5, 101.8, 100.4, 101.3),
         (101.3, 101.4, 100.8, 100.9),
         (100.9, 101.0, 99.9, 100.0),
         (100.0, 100.3, 99.95, 100.2),

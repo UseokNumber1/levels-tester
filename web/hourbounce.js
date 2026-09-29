@@ -57,18 +57,27 @@ function tpSlLine(s) {
   const slTxt = sl !== null ? `${s.sl_arch}${fmtPct(pctSigned(sl, lvl, s.side))}` : '—';
   return `TP ${tpTxt} · SL ${slTxt}`;
 }
-// Потенциальный PnL ячейки: серверный pnl_pct, фолбэк — по входу/выходу.
+// Потенциальный PnL ячейки: серверный pnl_pct (net), фолбэк — net по
+// входу/выходу ТОЧНО как серверный _hb_cell_pnl: gross минус maker/taker.
+// Вход T1L (лимитка) — maker 0.02, остальные входы — taker 0.05;
+// выход TP (лимит) — maker, SL/trail — taker. Голый гросс без комиссий
+// давал расхождение с отчётом до 0.1% на клетку.
+const MAKER_FEE_PCT = 0.02, TAKER_FEE_PCT = 0.05;
 function cellPnlPct(cell, side) {
   if (!cell) return null;
   if (cell.pnl_pct !== null && cell.pnl_pct !== undefined && cell.pnl_pct !== '') {
     const n = Number(cell.pnl_pct);
     if (Number.isFinite(n)) return n;
   }
+  if (cell.outcome === 'NO_ENTRY' || !cell.entry_price || !cell.exit_price) return null;
   const e = Number(cell.entry_price), x = Number(cell.exit_price);
   if (!Number.isFinite(e) || !Number.isFinite(x) || e === 0) return null;
-  let r = ((x - e) / e) * 100;
-  if (String(side || '').toUpperCase() === 'SHORT') r = -r;
-  return r;
+  let gross = ((x - e) / e) * 100;
+  if (String(side || '').toUpperCase() === 'SHORT') gross = -gross;
+  const entryFee = cell.entry === 'T1L' ? MAKER_FEE_PCT : TAKER_FEE_PCT;
+  const exitFee = cell.exit_kind === 'tp' ? MAKER_FEE_PCT : TAKER_FEE_PCT;
+  const fee = ((e * entryFee) / 100 + (x * exitFee) / 100) / e * 100;
+  return gross - fee;
 }
 function fmtPnlSigned(p) {
   const n = Number(p);
@@ -474,29 +483,28 @@ async function loadMatrix() {
   state.realTrade = real;
   const counts = { TAKE: 0, STOP: 0, NO_ENTRY: 0, EXPIRED: 0 };
   d.cells.forEach((c) => { counts[c.outcome] = (counts[c.outcome] || 0) + 1; });
-  // Самый выгодный вариант: max PnL среди закрытых (TAKE/STOP).
-  // Зелёная рамка — лучший; красная — наименьший убыток, если все 9 закрылись по стопу.
+  // Самый выгодный вариант — как «Лучший» в PnL-отчёте: max net-PnL
+  // (cellPnlPct, gross минус комиссии) среди всех решённых клеток
+  // (pnl !== 0; флэт 0 = нет входа — исключён). Раньше брался голый гросс
+  // только по TAKE/STOP — подсветка расходилась с best_variant отчёта.
+  // Зелёная рамка — лучший; красная — наименьший убыток, если все закрылись по стопу.
   const mSide = String((d.signal && d.signal.side) || (s.side) || '').toUpperCase();
-  const pnlOf = (c) => {
-    const e = Number(c.entry_price), x = Number(c.exit_price);
-    if (!Number.isFinite(e) || !Number.isFinite(x) || e === 0) return null;
-    let r = ((x - e) / e) * 100;
-    if (mSide === 'SHORT') r = -r;
-    return r;
-  };
-  const closed = d.cells
-    .map((c) => ({ c, pnl: pnlOf(c) }))
-    .filter((o) => o.pnl !== null && (o.c.outcome === 'TAKE' || o.c.outcome === 'STOP'));
+  const decided = d.cells
+    .map((c) => ({ c, pnl: cellPnlPct(c, mSide) }))
+    .filter((o) => o.pnl !== null && o.pnl !== 0);
   let bestKey = null, bestRed = false;
-  if (closed.length) {
-    closed.sort((a, b) => b.pnl - a.pnl);
-    bestKey = closed[0].c.entry + '|' + closed[0].c.sl_index;
+  if (decided.length) {
+    decided.sort((a, b) => b.pnl - a.pnl);
+    bestKey = decided[0].c.entry + '|' + decided[0].c.sl_index;
     bestRed = d.cells.every((c) => c.outcome === 'STOP');
   }
+  // Winrate агрегата — как в отчёте: wins (net > 0) / decided (net ≠ 0).
+  const mWins = decided.filter((o) => o.pnl > 0).length;
+  const mWrTxt = decided.length ? `${((mWins / decided.length) * 100).toFixed(1)}% (${mWins}/${decided.length})` : '—';
   const realTxt = real
     ? `реальная сделка <b style="color:#f7c948">★ ${real.entry}·SL${real.sl_index}</b> · арх. PnL <b>${fmtPnlSigned(real.pnl_pct_arch)}</b>`
     : 'реальная сделка <b>—</b> (в архиве нет закрытой сделки)';
-  $('agg').innerHTML = `<span>winrate <b>${Math.round((counts.TAKE / 9) * 100)}%</b></span>
+  $('agg').innerHTML = `<span>winrate <b>${mWrTxt}</b></span>
     <span>TAKE <b>${counts.TAKE}</b></span><span>STOP <b>${counts.STOP}</b></span>
     <span>NO_ENTRY <b>${counts.NO_ENTRY}</b></span><span>EXPIRED <b>${counts.EXPIRED}</b></span>
     <span>арх. исход <b>${s.outcome_arch}</b></span>

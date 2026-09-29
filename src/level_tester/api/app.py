@@ -1583,13 +1583,14 @@ def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf: st
 def _hb_build_matrix(signal_id: str, lookforward: int, pre: int, post: int,
                      refresh: bool = False, tf: str = "5m",
                      exec_mode: str = "grid") -> dict[str, Any]:
-    """Матрица 12 ячеек HourBounce (T1M/T1L/T2/T3 × SL, сетка).
+    """Матрица 12 ячеек HourBounce (T1M/T1L/T2/T3 × SL, унифицированный live-движок).
 
     Свечи ТФ (5m/1m): сначала БД, дыры догружаются с Binance идемпотентно.
     T1M/T1L дополнительно тянут M1-ряд того же окна (маркет на касании /
     заранее выставленная лимитка с заливкой по level).
-    lookforward/pre/post — бары запрошенного ТФ. exec_mode: grid (голый
-    трейлинг 1%/1%) или grid_be (SL сетки + БУ из конфига + трейлинг после БУ).
+    lookforward/pre/post — бары запрошенного ТФ. exec_mode: grid (live без БУ)
+    или grid_be (live с БУ 0.8/0.35); остальное (TP 5.0, trail 1.6/0.6 thr 0.1,
+    partial 0.8/50) одинаково — один движок, различается лишь флаг BE.
     Ячейки: кеш hb_reviews по (signal_id, config_fp[ТФ+режим], lookforward);
     пересчёт — при промахе, refresh=1 или когда догрузились новые свечи.
     Срезы lo/hi считаются под запрошенные pre/post при каждом вызове.
@@ -2036,7 +2037,7 @@ async def hourbounce_export(
 td,th{border:1px solid #2a323d;padding:4px 8px;font-family:monospace;text-align:left}.mt{padding:6px 10px;color:#8b96a5;font-family:monospace;font-size:11px}</style>
 </head><body>
 <h2>__SYM__ · __SIDE__ · __TF__ · level __LVL__ · __DT__</h2>
-<p>TP(arch) __TP__ · SL(arch) __SL__ · конфиг trail +1%/1%, окно подтверждения __CW__ (по времени), окно жизни: вся история до ближайшей отработки</p>
+<p>TP(arch) __TP__ · SL(arch) __SL__ · live-набор TP 5.0 / trail 1.6/0.6 thr 0.1 / partial 0.8/50, окно подтверждения __CW__ (по времени), окно жизни: вся история до ближайшей отработки</p>
 <div class="grid">__CARDS__</div>
 <table><tr><th>cell</th><th>seq</th><th>type</th><th>dt</th><th>price</th></tr>__ROWS__</table>
 <script id="hb-data" type="application/json">__PAYLOAD__</script>
@@ -2085,12 +2086,21 @@ for(const cell of D.cells){
 
 
 # ---------------------------------------------------------------------------
-# PnL-отчёт: все сигналы × 12 комбинаций (T1M/T1L/T2/T3 × SL1/SL2/SL3).
+# PnL-отчёт (унифицированный live-движок): все сигналы × 12/24 комбинации
+# (T1M/T1L/T2/T3 × SL1/SL2/SL3 [+БУ]).
+# Движок один для всех колонок и графиков: review_signal (порядок v5 в свече:
+# БУ → частичка → активация трейлинга строго после БУ → подтяжка с порогом
+# 0.1% → стоп → фикс-TP) + live-набор (TP 5.0, trail 1.6/0.6, partial 0.8/50,
+# комиссии maker 0.02/taker 0.05 через _hb_cell_pnl).
 # T1M — маркет на касании (триггер и исполнение полностью на M1, вход по принту=level).
 # T1L — заранее выставленная лимитка (заливка в касание всегда по level, без lookahead).
-# T2/T3 — входы с подтверждением на M5 (матрица считает их сама, здесь переиспользуются).
+# T2/T3 — входы с подтверждением на свечах выбранного ТФ.
+# Различаются только входные данные (entry/SL/BE-флаг) и ТФ.
+# Базовые колонки = live без БУ, колонки +БУ = live с БУ 0.8/0.35.
+# PG — тот же движок, но входные параметры из архива (эталон сверки 1:1,
+# exec_from_signal + вход PG + entry_price_override), не вариант выбора.
 # T0/T1 остаются в движке для исследований, но в отчёт не входят.
-# Клетка = PnL% со знаком стороны (нет входа -> 0), подвал = суммы по столбцам.
+# Клетка = net-PnL% со знаком стороны (нет входа -> 0), подвал = суммы по столбцам.
 # ---------------------------------------------------------------------------
 HB_REPORT_COLS = [f"{t}/SL{s}" for t in ("T1M", "T1L", "T2", "T3") for s in (1, 2, 3)]
 # Колонки Grid+БУ: те же входы/стопы, но со стопом в БУ (триггер/лок из конфига)
@@ -2210,6 +2220,33 @@ def _hb_cell_pnl(cell: dict[str, Any], side: str) -> float:
         return 0.0
 
 
+def _r2(v: float) -> float:
+    """Копейки half-up как JS Math.round: floor(v*100+0.5)/100.
+
+    Те же double-операции в том же порядке, что `Math.round(v*100)/100`
+    в отчётах, — побитово тот же результат. Python round() — банковский
+    (half-even) и на границе x.xx5 давал расхождение футера сервера
+    с пересчётом клиента (тот же алгоритм — те же числа).
+    """
+    import math as _math
+
+    return _math.floor(float(v) * 100 + 0.5) / 100
+
+
+def _r3(v: float) -> float:
+    """Тысячные half-up (для KPI): тот же приём, что _r2, на 3 знака."""
+    import math as _math
+
+    return _math.floor(float(v) * 1000 + 0.5) / 1000
+
+
+def _r1(v: float) -> float:
+    """Десятые half-up (для winrate %): тот же приём, что _r2, на 1 знак."""
+    import math as _math
+
+    return _math.floor(float(v) * 10 + 0.5) / 10
+
+
 class HbReportRequest(BaseModel):
     signal_ids: list[str] = Field(min_length=1, max_length=5000)
     lookforward: int = Field(default=2000, ge=20, le=100000)
@@ -2306,65 +2343,10 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                 by_key = {(c["entry"], c["sl_index"]): c for c in data["cells"]}
                 by_key_be = ({(c["entry"], c["sl_index"]): c for c in data_be["cells"]}
                              if data_be else {})
-                # T1X-страховка: матрица уже считает T1M/T1L сама (_hb_build_matrix),
-                # добор нужен только если ячейки реально нет (старый кеш, дыра M1),
-                # иначе пропускаем лишние загрузки свечей. T2/T3 всегда из матрицы.
-                _t1x_wanted = [_c0 for _c0 in {_hb_be_base_col(c).split("/")[0] for c in columns} if _c0 in ("T1M", "T1L")]
-                _t1x_missing = bool(_t1x_wanted) and (
-                    any((_code, _sl) not in by_key for _code in _t1x_wanted for _sl in (1, 2, 3))
-                    or (with_be and data_be is not None
-                        and any((_code, _sl) not in by_key_be for _code in _t1x_wanted for _sl in (1, 2, 3)))
-                )
-                if _t1x_missing:
-                    try:
-                        from level_tester.backtester.hourbounce import (
-                            config_for_tf as _t0_cfg_tf,
-                            grid_be_exec as _t0_gbe,
-                            grid_exec as _t0_ge,
-                            review_signal as _t0_rs,
-                            step_for_tf as _t0_step,
-                        )
-                        from level_tester.infrastructure.hourbounce_store import (
-                            load_candles_cached as _t0_lcc,
-                        )
-                        _sig_obj, _meta, _dtp, _st, _side, _ps = _hb_resolve_signal(sid)
-                        _cfg = _t0_cfg_tf(tf)
-                        _stp = _t0_step(tf)
-                        _start = _st - 30 * timedelta(minutes=_stp)
-                        _nn = datetime.now(UTC)
-                        _nf = _nn.replace(minute=(_nn.minute // _stp) * _stp, second=0, microsecond=0)
-                        _end = min(_st + lookforward * timedelta(minutes=_stp), _nf)
-                        _candles, _ = _t0_lcc(
-                            session_factory, binance_client, _sig_obj.symbol,
-                            _start, _end, refresh=False, tf=tf)
-                        try:
-                            _m1, _ = _t0_lcc(
-                                session_factory, binance_client, _sig_obj.symbol,
-                                _start, _end, refresh=False, tf="1m")
-                        except Exception:
-                            _m1 = None
-                        for _code in ("T1M", "T1L"):
-                            for _sl in (1, 2, 3):
-                                if (_code, _sl) not in by_key:
-                                    _rx = _t0_rs(
-                                        side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
-                                        signal_time=_st, candles=_candles, entry_code=_code,  # type: ignore[arg-type]
-                                        sl_index=_sl, config=_cfg, exec_params=_t0_ge(_sl, _cfg),
-                                        m1_candles=_m1, tf=tf)
-                                    _jx = _hb_result_json(_rx, _side)
-                                    _jx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
-                                    by_key[(_code, _sl)] = _jx
-                                if with_be and data_be is not None and (_code, _sl) not in by_key_be:
-                                    _rbx = _t0_rs(
-                                        side=_side, level_price=Decimal(str(_sig_obj.entry_price)),
-                                        signal_time=_st, candles=_candles, entry_code=_code,  # type: ignore[arg-type]
-                                        sl_index=_sl, config=_cfg, exec_params=_t0_gbe(_sl, _cfg),
-                                        m1_candles=_m1, tf=tf)
-                                    _jbx = _hb_result_json(_rbx, _side)
-                                    _jbx["sl_pct"] = str(_cfg.sl_sizes[_sl - 1])
-                                    by_key_be[(_code, _sl)] = _jbx
-                    except Exception:  # noqa: BLE001 - T1X-добор не роняет строку отчёта
-                        logger.debug("hourbounce report T1M/T1L failed: %s", sid, exc_info=True)
+                # Единый источник ячеек — матрица (_hb_build_matrix → review_matrix
+                # на унифицированном live-движке). Отдельного добора T1M/T1L здесь
+                # нет: второй путь расчёта давал расхождения «разных движков».
+                # Недостающая ячейка = честный 0/NO_ENTRY, а не пересчёт в обход.
                 cells = {}
                 row_total = 0.0
                 for col in columns:
@@ -2375,8 +2357,8 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                                       "exit_kind": pg.get("exit_kind"),
                                       "entry_price": pg.get("entry_price"),
                                       "exit_price": pg.get("exit_price")}
-                        d = round(pnl, 2)
-                        footer[col] = round(footer[col] + d, 2)
+                        d = _r2(pnl)
+                        footer[col] = _r2(footer[col] + d)
                         continue
                     t, s = _hb_be_base_col(col).split("/")
                     by = by_key_be if HB_BE_SUFFIX in col else by_key
@@ -2386,13 +2368,15 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                     cells[col] = {"pnl": pnl, "outcome": outcome}
                     # Футер — в копейках (2 знака): таблица показывает toFixed(2),
                     # итог обязан сходиться с суммой отображаемых клеток.
-                    d = round(pnl, 2)
-                    footer[col] = round(footer[col] + d, 2)
+                    # _r2 = JS Math.round (half-up): банковский round() на границе
+                    # x.xx5 давал копейку расхождения с пересчётом клиента.
+                    d = _r2(pnl)
+                    footer[col] = _r2(footer[col] + d)
                     row_total = round(row_total + pnl, 4)
                 # Лучший — только по сетке (PG — эталон сверки, не вариант выбора).
                 best = max((cells[c]["pnl"] for c in grid_cols), default=0.0)
                 any_hit = any(cells[c]["pnl"] for c in grid_cols)
-                footer_best = round(footer_best + (round(best, 2) if any_hit else 0.0), 2)
+                footer_best = _r2(footer_best + (_r2(best) if any_hit else 0.0))
                 # числовые метки для сортировки строк (форматы дат в архиве смешанные)
                 _created_dt = _hb_parse_time(sig.get("created_at"))
                 _worked_dt = _hb_parse_time(sig.get("touch_ref"))
@@ -2675,9 +2659,6 @@ def _tm1_build_rows(sess_items: list[dict[str, Any]], params: dict[str, Any]) ->
                      "has_partial": False, "has_be": False}
             else:
                 c = _tm1_compute_cell(it["side"], it["level_price"], sig_time, it["candles"], params, cfg)
-            d = round(c["pnl"], 2)
-            footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
-            footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
             row_err = prep_error if (prep_error and c.get("outcome") in ("NO_ENTRY", "ERROR")) else None
             pg = _tm1_pg_ref(it) if it.get("candles") else {"pnl": 0.0, "outcome": "NO_ENTRY"}
             rows.append(_tm1_row(it, c, pg, {"status": it.get("arch_status"),
@@ -2691,6 +2672,13 @@ def _tm1_build_rows(sess_items: list[dict[str, Any]], params: dict[str, Any]) ->
                                  {"status": it.get("arch_status"),
                                   "pnl_percent": it.get("arch_pnl"),
                                   "traded": it.get("traded")}, err))
+    # Футер — в том же порядке (dt_place, signal_id), что equity в _tm1_kpi:
+    # те же операции в том же порядке — футер TOTAL == kpi.total == конец equity.
+    for i in sorted(range(len(rows)),
+                    key=lambda k: (rows[k].get("dt_place") or "", rows[k].get("signal_id") or "")):
+        d = _r2(float((rows[i].get("cells") or {}).get(TM1_COLUMN, {}).get("pnl") or 0.0))
+        footer[TM1_COLUMN] = _r2(footer[TM1_COLUMN] + d)
+        footer["TOTAL"] = _r2(footer["TOTAL"] + d)
     return rows, footer
 
 
@@ -2702,28 +2690,32 @@ def _tm1_kpi(rows: list[dict[str, Any]]) -> dict[str, Any]:
     decided = [v for v in pnls if v != 0]
     wins = [v for v in decided if v > 0]
     losses = [v for v in decided if v < 0]
-    gross_win = round(sum(wins), 2)
-    gross_loss = round(sum(losses), 2)
-    pf = round(gross_win / abs(gross_loss), 3) if gross_loss else (None if not gross_win else float("inf"))
-    # equity в хронологии выставления
+    # Суммы — сырые (как клиентская EV-строка: sw/sl из клеток без округления),
+    # финальное округление — half-up (_r2/_r3 = JS Math.round), иначе копейка
+    # расхождения с таблицей/графиком на границе x.xx5.
+    gross_win = sum(wins)
+    gross_loss = sum(losses)
+    pf = _r3(gross_win / abs(gross_loss)) if gross_loss else (None if not gross_win else float("inf"))
+    # equity в хронологии выставления; шаг — те же копейки, что в футере,
+    # итог совпадает с TOTAL (последняя точка equity).
     order = sorted(range(len(rows)), key=lambda i: (rows[i].get("dt_place") or "", rows[i].get("signal_id") or ""))
     equity: list[float] = []
     run = 0.0
     peak = 0.0
     max_dd = 0.0
     for i in order:
-        run = round(run + round(pnls[i], 2), 2)
+        run = _r2(run + _r2(pnls[i]))
         equity.append(run)
         peak = max(peak, run)
-        max_dd = min(max_dd, round(run - peak, 2))
+        max_dd = min(max_dd, _r2(run - peak))
     # гистограмма: "красивый" шаг бина (1/2/2.5/5×10^n), макс. ~24 бина
     hist = {"bins": [], "counts": []}
-    mean_v = round(sum(decided) / len(decided), 3) if decided else 0.0
+    mean_v = _r3(sum(decided) / len(decided)) if decided else 0.0
     med_v = 0.0
     if decided:
         srt = sorted(decided)
         mid = len(srt) // 2
-        med_v = round((srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2), 3)
+        med_v = _r3(srt[mid] if len(srt) % 2 else (srt[mid - 1] + srt[mid]) / 2)
         lo, hi = srt[0], srt[-1]
         raw_step = (hi - lo) / 24 if hi > lo else abs(hi) / 10 or 0.1
         mag = 10 ** int(_math.floor(_math.log10(raw_step))) if raw_step > 0 else 0.1
@@ -2745,18 +2737,25 @@ def _tm1_kpi(rows: list[dict[str, Any]]) -> dict[str, Any]:
         exits[str(c.get("exit_kind"))] = exits.get(str(c.get("exit_kind")), 0) + 1
         n_partial += 1 if c.get("has_partial") else 0
         n_be += 1 if c.get("has_be") else 0
-    total = round(sum(round(v, 2) for v in pnls), 2)
-    avg_win_v = round(gross_win / len(wins), 3) if wins else 0.0
-    avg_loss_v = round(gross_loss / len(losses), 3) if losses else 0.0
+    # TOTAL = конец equity (та же последовательность сложений — те же копейки,
+    # что в графике и в футере _tm1_build_rows при том же порядке).
+    total = equity[-1] if equity else 0.0
+    avg_win_v = _r3(gross_win / len(wins)) if wins else 0.0
+    avg_loss_v = _r3(gross_loss / len(losses)) if losses else 0.0
     wr_frac = (len(wins) / len(decided)) if decided else 0.0
     # Матожидание ТС на решённых сделках (флэт/NO_ENTRY исключены):
     # EV = wr*avg_win + (1-wr)*avg_loss ≡ avg при decided-логике.
-    expectancy_v = round(wr_frac * avg_win_v + (1 - wr_frac) * avg_loss_v, 3) if decided else 0.0
+    # Формула — та же, что fmtEVcell клиента: СЫРЫЕ суммы без промежуточных
+    # округлений (иначе округлённый avg_win сдвигает бинарное значение и 2-й
+    # знак в карточке расходится со строкой EV таблицы), финал — half-up.
+    _raw_aw = gross_win / len(wins) if wins else 0.0
+    _raw_al = gross_loss / (len(decided) - len(wins)) if len(decided) - len(wins) else 0.0
+    expectancy_v = _r3(wr_frac * _raw_aw + (1 - wr_frac) * _raw_al) if decided else 0.0
     return {
         "total": total, "count": len(rows), "decided": len(decided),
         "wins": len(wins), "losses": len(losses),
-        "winrate": round(len(wins) / len(decided) * 100, 1) if decided else None,
-        "avg": round(total / len(decided), 3) if decided else 0.0,
+        "winrate": _r1(len(wins) / len(decided) * 100) if decided else None,
+        "avg": _r3(total / len(decided)) if decided else 0.0,
         "avg_win": avg_win_v,
         "avg_loss": avg_loss_v,
         "expectancy": expectancy_v,
@@ -2797,9 +2796,6 @@ def _run_hb_tm1_report(job_id: str, request: HbReportTm1Request) -> None:
                     start, end, refresh=False, tf="1m")
                 cell = _tm1_compute_cell(side, sig_obj.entry_price, sig_time, candles, params, cfg)
                 cells = {TM1_COLUMN: cell}
-                d = round(cell["pnl"], 2)
-                footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
-                footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
                 pg = _tm1_pg_ref({"signal_id": sid, "side": side,
                                   "level_price": sig_obj.entry_price,
                                   "sig_time_iso": sig_time.isoformat(),
@@ -2820,6 +2816,13 @@ def _run_hb_tm1_report(job_id: str, request: HbReportTm1Request) -> None:
                     {"pnl": 0.0, "outcome": "ERROR"},
                     {"pnl": 0.0, "outcome": "NO_ENTRY"}, info, str(exc)[:200]))
             job["done"] = i + 1
+        # Футер — в том же порядке (dt_place, signal_id), что equity в _tm1_kpi:
+        # футер TOTAL == kpi.total == конец equity.
+        for i in sorted(range(len(rows)),
+                        key=lambda k: (rows[k].get("dt_place") or "", rows[k].get("signal_id") or "")):
+            d = _r2(float((rows[i].get("cells") or {}).get(TM1_COLUMN, {}).get("pnl") or 0.0))
+            footer[TM1_COLUMN] = _r2(footer[TM1_COLUMN] + d)
+            footer["TOTAL"] = _r2(footer["TOTAL"] + d)
         job["result"] = {"columns": columns, "rows": rows, "footer": footer,
                          "count": len(rows), "tf": "1m", "entry": "T1M",
                          "params": params, "kpi": _tm1_kpi(rows)}

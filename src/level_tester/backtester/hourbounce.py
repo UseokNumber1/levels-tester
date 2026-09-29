@@ -72,15 +72,15 @@ DEFAULT_CONFIG = HourBounceConfig()
 
 
 def _load_grid_be_params() -> tuple[Decimal, Decimal]:
-    """БУ-параметры сетки Grid+БУ из config/default.yaml.
+    """БУ-параметры унифицированного движка из config/default.yaml.
 
-    Fallback — 0.9/0.35 (как живой конфиг PGv2). Требуется перезапуск
-    сервера после правок файла.
+    Fallback — 0.8/0.35 (живой снапшот PGv2, TRADE_SETTINGS_2026-09-28).
+    Требуется перезапуск сервера после правок файла.
     """
     import os
     from pathlib import Path
 
-    fallback = (Decimal("0.9"), Decimal("0.35"))
+    fallback = (Decimal("0.8"), Decimal("0.35"))
     try:
         default_path = Path(__file__).resolve().parents[3] / "config" / "default.yaml"
         cfg_path = Path(os.environ.get("LEVELS_TESTER_CONFIG", str(default_path)))
@@ -90,7 +90,7 @@ def _load_grid_be_params() -> tuple[Decimal, Decimal]:
 
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         hb = raw.get("hourbounce", {}) or {}
-        trigger = Decimal(str(hb.get("grid_be_trigger_pct", "0.9")))
+        trigger = Decimal(str(hb.get("grid_be_trigger_pct", "0.8")))
         lock = Decimal(str(hb.get("grid_be_lock_pct", "0.35")))
         if trigger <= 0 or lock < 0:
             return fallback
@@ -148,7 +148,10 @@ M5_WINDOW_MIN = 100  # confirm_window_w (20) * 5 мин
 # v6: эталон PG 1:1 — вход по архивной цене (entry_price_override), игнор
 # перевёрнутого архивного TP, детектор несвежего SL (sl_filled с выходом
 # вдали от записанного SL → config-фолбэк).
-ENGINE_VERSION = 6
+# v7: унифицированный live-движок — grid/grid_be собраны на tm1_exec
+# с живыми дефолтами PGv2 (TP 5.0, trail 1.6/0.6 thr 0.1, BE 0.8/0.35,
+# partial 0.8/50); base и +БУ различаются только флагом BE.
+ENGINE_VERSION = 7
 
 
 def validate_tf(tf: str) -> str:
@@ -180,7 +183,8 @@ def config_for_tf(tf: str) -> HourBounceConfig:
 class ExecParams:
     """Параметры исполнения сделки.
 
-    GRID: sl_pct из сетки (0.5/1.0/1.5), трейлинг 1%/1% без BE и фикс-TP.
+    GRID (унифицированный live): sl_pct из сетки (0.5/1.0/1.5), TP 5.0,
+    trail 1.6/0.6 thr 0.1, partial 0.8/50; grid без BE, grid_be с БУ 0.8/0.35.
     SIGNAL (1:1 PGv2): абсолютные SL/TP из архива + BE + трейлинг сигнала.
     TM1: кастомный набор (стоп/тейк/BE/трейлинг/частичная фиксация) на M1.
     """
@@ -223,28 +227,63 @@ class ExecParams:
         )
 
 
+# Унифицированный live-набор (TRADE_SETTINGS_2026-09-28 + TM1-дефолты UI):
+# SL задаёт колонка, остальное фиксировано. Базовые колонки — BE выкл,
+# колонки +БУ — BE вкл; всё остальное (TP/трейлинг/частичка/порог/комиссии/
+# порядок v5 в свече) идентично. Это один движок, а не два.
+LIVE_TP_PCT = Decimal("5.0")
+LIVE_TRAIL_ACTIVATION_PCT = Decimal("1.6")
+LIVE_TRAIL_DISTANCE_PCT = Decimal("0.6")
+LIVE_TRAIL_THRESHOLD_PCT = Decimal("0.1")
+LIVE_PARTIAL_TRIGGER_PCT = Decimal("0.8")
+LIVE_PARTIAL_CLOSE_PCT = Decimal("50.0")
+
+
 def grid_exec(sl_index: int, config: HourBounceConfig = DEFAULT_CONFIG) -> ExecParams:
-    return ExecParams(
-        sl_pct=config.sl_sizes[sl_index - 1],
-        trail_activation_pct=config.tp_trail_activate_pct,
-        trail_distance_pct=config.tp_trail_distance_pct,
-        trail_threshold_pct=Decimal("0"),
+    """Базовая колонка унифицированного отчёта: live-набор без БУ.
+
+    SL — из сетки колонки, TP 5.0 / trail 1.6/0.6 thr 0.1 / partial 0.8/50.
+    От +БУ отличается только выключенным BE (входной параметр, не движок).
+    """
+    import dataclasses as _dc
+
+    return _dc.replace(
+        tm1_exec(
+            sl_pct=config.sl_sizes[sl_index - 1],
+            tp_pct=LIVE_TP_PCT,
+            be_trigger_pct=None,
+            be_lock_pct=GRID_BE_LOCK_PCT,
+            trail_activation_pct=LIVE_TRAIL_ACTIVATION_PCT,
+            trail_distance_pct=LIVE_TRAIL_DISTANCE_PCT,
+            trail_threshold_pct=LIVE_TRAIL_THRESHOLD_PCT,
+            partial_trigger_pct=LIVE_PARTIAL_TRIGGER_PCT,
+            partial_close_pct=LIVE_PARTIAL_CLOSE_PCT,
+        ),
+        sl_source="grid",
     )
 
 
 def grid_be_exec(sl_index: int, config: HourBounceConfig = DEFAULT_CONFIG) -> ExecParams:
-    """Сетка Grid+БУ: SL из сетки + перевод стопа в БУ по триггеру из конфига.
+    """Колонка +БУ унифицированного отчёта: live-набор с БУ из конфига.
 
-    Трейлинг тот же 1%/1%, включается строго после БУ (гейт в движке,
-    порядок как в проде PGv2) — см. review_signal: `(not ex.use_be or be_was)`.
+    Трейлинг включается строго после БУ (гейт в движке, порядок как в
+    проде PGv2) — см. review_signal: `(not ex.use_be or be_was)`.
     """
-    return ExecParams(
-        sl_pct=config.sl_sizes[sl_index - 1],
-        be_trigger_pct=GRID_BE_TRIGGER_PCT,
-        be_lock_pct=GRID_BE_LOCK_PCT,
-        trail_activation_pct=config.tp_trail_activate_pct,
-        trail_distance_pct=config.tp_trail_distance_pct,
-        trail_threshold_pct=Decimal("0"),
+    import dataclasses as _dc
+
+    return _dc.replace(
+        tm1_exec(
+            sl_pct=config.sl_sizes[sl_index - 1],
+            tp_pct=LIVE_TP_PCT,
+            be_trigger_pct=GRID_BE_TRIGGER_PCT,
+            be_lock_pct=GRID_BE_LOCK_PCT,
+            trail_activation_pct=LIVE_TRAIL_ACTIVATION_PCT,
+            trail_distance_pct=LIVE_TRAIL_DISTANCE_PCT,
+            trail_threshold_pct=LIVE_TRAIL_THRESHOLD_PCT,
+            partial_trigger_pct=LIVE_PARTIAL_TRIGGER_PCT,
+            partial_close_pct=LIVE_PARTIAL_CLOSE_PCT,
+        ),
+        sl_source="grid_be",
     )
 
 
@@ -1087,12 +1126,16 @@ def review_matrix(
     m1_candles: list[Candle] | None = None,
     tf: str = "5m",  # ТФ основного ряда candles; T1L исполняется на нём
 ) -> list[HourBounceResult]:
-    """Матрица 12 ячеек: T1M/T1L/T2/T3 × SL1/SL2/SL3.
+    """Матрица 12 ячеек: T1M/T1L/T2/T3 × SL1/SL2/SL3 (унифицированный live-движок).
 
     T1 (вход по level на M5 с lookahead) из матрицы убран — вместо него T1M
     (маркет на касании, триггер и исполнение на M1) и T1L (заранее
     выставленная лимитка: заливка в касание по level, исполнение на свечах
     выбранного ТФ, без lookahead).
+    Все ячейки — один движок review_signal (порядок v5) + live-набор
+    (TP 5.0, trail 1.6/0.6 thr 0.1, partial 0.8/50); exec_mode различает
+    только BE: grid = без БУ, grid_be = с БУ 0.8/0.35. Меняются лишь
+    входные данные (entry/SL/BE-флаг) и ТФ.
     Без m1_candles ячейки T1M/T1L дают NO_ENTRY/no_m1.
     """
     validate_tf(tf)
