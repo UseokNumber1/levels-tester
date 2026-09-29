@@ -18,10 +18,21 @@
 - SL: % от входа; TP: трейлинг activate +1% / distance 1%
 - порядок в свече: сначала стоп, затем активация; подтяжка с N+1; коллизия -> STOP+ambiguous
 
-Режим SIGNAL (сделка PGv2 1:1): SL/TP/BE/trailing берутся из архивного сигнала
-(ExecParams), порядок в свече — как в PGv2 trade_model.tick: BE → активация
-трейлинга (строго после BE, если BE задан) → подтяжка (порог) → стоп → TP.
-Фикс-парциал breakeven_fix_pct (размер позиции) в ценовом реплее не моделируется.
+Режим SIGNAL (сделка PGv2 1:1): SL/TP/BE/trailing/частичка берутся из
+архивного сигнала (ExecParams; BE-fix маппится в partial по цене триггера БУ),
+вход — по архивной цене (entry_price_override), иначе абсолютные SL/TP
+архива висят на чужой базе. Перевёрнутый архивный TP (не с той стороны входа)
+игнорируется; несвежий SL (sl_filled с выходом вдали от записанного SL при
+пустых флагах) — config-фолбэк, как подвинутый.
+порядок в свече v5 — гэп → стоп (предпочтительнее TP/БУ) → БУ → частичка
+(фикс доли по триггеру, сделка продолжается) → активация трейлинга (строго
+после БУ, если БУ задан) → подтяжка (порог) → стоп → TP.
+Релокация БУ вступает в силу со следующей свечи (как подтяжка трейлинга);
+лок вне рынка (за триггером) — выход по цене триггера: живой стоп-маркет
+исполнился бы сразу по рынку. Стоп в зоне прибыли срабатывает только на
+пуллбэке, гэп через стоп — сразу по open.
+Ручные закрытия оператора (closed_manual) не моделируются: расхождение
+модели с архивом по таким строкам ожидаемо, за ним не гонимся.
 """
 from __future__ import annotations
 
@@ -130,7 +141,14 @@ M5_WINDOW_MIN = 100  # confirm_window_w (20) * 5 мин
 # Версия логики движка: входит в отпечаток кеша hb_reviews
 # (config_fingerprint). Поднимать при любом изменении правил входа/исполнения,
 # иначе старые ячейки будут отдаваться как свежие.
-ENGINE_VERSION = 3
+# v4: SIGNAL/PG маппит BE-fix частичку (взвешенный выход как в проде PGv2),
+# tm1_exec порог трейлинга по умолчанию 0.1% (как trailing_update_threshold_pct).
+# v5: политика v5 внутри свечи (стоп первый, релокация БУ со следующей свечи,
+# пуллбэк-правило для профит-стопов, выход по триггеру при локе вне рынка).
+# v6: эталон PG 1:1 — вход по архивной цене (entry_price_override), игнор
+# перевёрнутого архивного TP, детектор несвежего SL (sl_filled с выходом
+# вдали от записанного SL → config-фолбэк).
+ENGINE_VERSION = 6
 
 
 def validate_tf(tf: str) -> str:
@@ -238,6 +256,7 @@ def tm1_exec(
     be_lock_pct: Decimal | float | str | None = None,
     trail_activation_pct: Decimal | float | str | None = None,
     trail_distance_pct: Decimal | float | str | None = None,
+    trail_threshold_pct: Decimal | float | str | None = Decimal("0.1"),
     partial_trigger_pct: Decimal | float | str | None = None,
     partial_close_pct: Decimal | float | str | None = None,
 ) -> ExecParams:
@@ -245,6 +264,8 @@ def tm1_exec(
 
     Пустые/нулевые значения = механизм выключен. Валидация диапазонов —
     на стороне API; здесь только нормализация в Decimal/None.
+    Порог перестановки трейлинга по умолчанию 0.1% — как в проде PGv2
+    (trailing_update_threshold_pct); 0/None = подтяжка на каждом тике.
     """
     def _pct(v: object) -> Decimal | None:
         d = _dec(v)
@@ -252,6 +273,9 @@ def tm1_exec(
             return None
         return d
 
+    thr = _dec(trail_threshold_pct)
+    if thr is None or thr < 0:
+        thr = Decimal("0.1")
     return ExecParams(
         sl_pct=_pct(sl_pct),
         tp_pct=_pct(tp_pct),
@@ -259,7 +283,7 @@ def tm1_exec(
         be_lock_pct=_dec(be_lock_pct),
         trail_activation_pct=_pct(trail_activation_pct),
         trail_distance_pct=_pct(trail_distance_pct),
-        trail_threshold_pct=Decimal("0"),
+        trail_threshold_pct=thr,
         partial_trigger_pct=_pct(partial_trigger_pct),
         partial_close_pct=_dec(partial_close_pct),
         sl_source="tm1",
@@ -275,19 +299,119 @@ def _dec(v: object) -> Decimal | None:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class PositionLevels:
+    """Ценовые уровни позиции, посчитанные один раз от цены входа.
+
+    be_trig/be_lock/act_price/tp_price/partial_trig — абсолютные цены;
+    partial_frac — доля позиции 0..1. None = механизм выключен.
+    """
+
+    be_trig: Decimal | None = None
+    be_lock: Decimal | None = None
+    act_price: Decimal | None = None
+    tp_price: Decimal | None = None
+    partial_trig: Decimal | None = None
+    partial_frac: Decimal | None = None
+
+
+def _position_levels(entry_price: Decimal, is_long: bool, ex: ExecParams) -> PositionLevels:
+    """Уровни позиции от цены входа. Чистая функция — одно место расчёта."""
+    if is_long:
+        be_trig = entry_price * (Decimal(1) + ex.be_trigger_pct / Decimal(100)) if (ex.use_be and ex.be_trigger_pct is not None) else None
+        be_lock = entry_price * (Decimal(1) + ex.be_lock_pct / Decimal(100)) if (ex.use_be and ex.be_lock_pct is not None) else None
+        act_price = entry_price * (Decimal(1) + ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and ex.trail_activation_pct is not None) else None
+        partial_trig = entry_price * (Decimal(1) + ex.partial_trigger_pct / Decimal(100)) if (ex.use_partial and ex.partial_trigger_pct is not None) else None
+    else:
+        be_trig = entry_price * (Decimal(1) - ex.be_trigger_pct / Decimal(100)) if (ex.use_be and ex.be_trigger_pct is not None) else None
+        be_lock = entry_price * (Decimal(1) - ex.be_lock_pct / Decimal(100)) if (ex.use_be and ex.be_lock_pct is not None) else None
+        act_price = entry_price * (Decimal(1) - ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and ex.trail_activation_pct is not None) else None
+        partial_trig = entry_price * (Decimal(1) - ex.partial_trigger_pct / Decimal(100)) if (ex.use_partial and ex.partial_trigger_pct is not None) else None
+    # Фикс-тейк TM1 (% от входа) + архивный абсолютный TP (SIGNAL). TM1-приоритет — tp_pct.
+    # Перевёрнутый TP (ниже входа для LONG) — не цель, а несвежие данные: игнор.
+    tp_price = ex.fixed_tp
+    if tp_price is not None:
+        if (is_long and tp_price <= entry_price) or (not is_long and tp_price >= entry_price):
+            tp_price = None
+    if ex.tp_pct is not None and ex.tp_pct > 0:
+        tp_price = entry_price * (Decimal(1) + ex.tp_pct / Decimal(100)) if is_long else entry_price * (Decimal(1) - ex.tp_pct / Decimal(100))
+    partial_frac = (
+        ex.partial_close_pct / Decimal(100)
+        if ex.use_partial and ex.partial_close_pct is not None
+        else None
+    )
+    return PositionLevels(
+        be_trig=be_trig, be_lock=be_lock, act_price=act_price,
+        tp_price=tp_price, partial_trig=partial_trig, partial_frac=partial_frac,
+    )
+
+
+def _touched(is_long: bool, level: Decimal, c: Candle) -> bool:
+    """Уровень задет в благоприятную сторону: LONG — high, SHORT — low.
+
+    Единый предикат для триггера БУ, активации трейлинга и триггера частички.
+    """
+    return (c.high >= level) if is_long else (c.low <= level)
+
+
+def _gapped(is_long: bool, level: Decimal, c: Candle) -> bool:
+    """Гэп через уровень на open: LONG — open ниже/с're уровня, SHORT — выше/на нём.
+
+    Стоп в зоне прибыли при гэпе вниз тоже исполняется сразу по open:
+    живой стоп-маркет выше рынка маркетабелен.
+    """
+    return (c.open <= level) if is_long else (c.open >= level)
+
+
+def _stop_hit(is_long: bool, eff: Decimal, entry_price: Decimal, c: Candle) -> bool:
+    """Пробитие эффективного стопа внутри свечи (стоп предпочтительнее TP/БУ).
+
+    Стоп в зоне убытка — достаточно low/high в неблагоприятную сторону.
+    Стоп в зоне прибыли (БУ-лок/трейлинг выше входа для LONG) — только пуллбэк:
+    свеча открылась ВЫШЕ стопа и спустилась к нему. Продолжение движения
+    сквозь лок выходом не считается (цена такого стопа могла не печатать).
+    """
+    if is_long:
+        if eff > entry_price:
+            return c.open > eff and c.low <= eff
+        return c.low <= eff
+    if eff < entry_price:
+        return c.open < eff and c.high >= eff
+    return c.high >= eff
+
+
+def _tp_hit(is_long: bool, tp_price: Decimal, c: Candle) -> bool:
+    """Фикс-тейк напечатан: цена инструмента дошла до уровня."""
+    return (c.high >= tp_price) if is_long else (c.low <= tp_price)
+
+
+def _lock_beyond_market(is_long: bool, be_lock: Decimal, be_trig: Decimal) -> bool:
+    """Лок БУ вне рынка относительно триггера: живой стоп-маркет исполнился бы
+    сразу по рынку (цена лока могла не печататься)."""
+    return (be_lock > be_trig) if is_long else (be_lock < be_trig)
+
+
 # SL PGv2 по умолчанию (config.yaml: stop_loss_method=percent, stop_loss_pct=1.0).
 # Нужен, когда архивный SL уже подвинут сделкой (BE/трейлинг) и начальный
 # по нему не восстановить.
 PGV2_CONFIG_SL_PCT = Decimal("1.0")
 
 
-def exec_from_signal(sig: SignalEntry) -> ExecParams | None:
+def exec_from_signal(sig: SignalEntry, close_reason: str | None = None,
+                     exit_price: Decimal | float | str | None = None) -> ExecParams | None:
     """Параметры сделки PGv2 1:1 из архивного сигнала. None — нет usable SL.
 
     Важно: у закрытых сделок stop_loss в архиве уже может быть подвинут
     (sl_moved_to_breakeven / trailing_activated) — тогда это НЕ начальный SL,
     и начальный восстанавливаем по правилу конфига (stop_loss_pct).
+    Флаги архива ненадёжны: детектор несвежего SL — закрытие `sl_filled` при
+    выходе далеко от записанного SL (напр. INJUSDT: выход 6.121 против SL 6.241
+    при флагах 0/0 — стоп двигали трейлингом, но флаг не выставили).
     TP фиксируется при создании и в архиве всегда начальный.
+    Частичная фиксация BE (breakeven_fix_enabled/pct, engine.py:4802-4909):
+    TP_BE-ордер на breakeven_fix_pct% позиции стоит с момента входа по цене
+    триггера БУ — маппим в partial_trigger/partial_close, взвешенный выход
+    движка повторяет механику продa (0.5×триггер + 0.5×остаток при fix 50%).
     """
     sl: Decimal | None = None
     sl_how = ""
@@ -296,6 +420,16 @@ def exec_from_signal(sig: SignalEntry) -> ExecParams | None:
         sl = _dec(sig.stop_loss)
         if sl is not None:
             sl_how = "archive"
+            if close_reason == "sl_filled" and exit_price is not None and sig.entry_price:
+                # Выход по стопу обязан совпасть с записанным SL (плюс проскальзывание).
+                # Расхождение >0.5% — записанный SL несвежий (двигали без флага).
+                ex_p = _dec(exit_price)
+                en_p = _dec(sig.entry_price)
+                if (ex_p is not None and en_p is not None and en_p > 0
+                        and abs(ex_p - sl) / en_p > Decimal("0.005")):
+                    sl = None
+                    sl_how = ""
+                    mutated = True
     if sl is None:
         # SL в архиве уже подвинут сделкой (или отсутствует): начальный
         # восстанавливаем по правилу конфига PGv2 (stop_loss_method=percent).
@@ -319,6 +453,14 @@ def exec_from_signal(sig: SignalEntry) -> ExecParams | None:
     be = bool(sig.breakeven_enabled) and be_t is not None and be_p is not None
     tr_a, tr_d = _dec(sig.trailing_activation_pct), _dec(sig.trailing_stop_pct)
     tr_on = sig.trailing_stop_enabled is not False and tr_a is not None and tr_d is not None
+    fix_pct = _dec(sig.breakeven_fix_pct)
+    fix_on = (
+        be
+        and sig.breakeven_fix_enabled is not False
+        and fix_pct is not None
+        and fix_pct > 0
+        and fix_pct < 100
+    )
     return ExecParams(
         sl_price=sl,
         fixed_tp=tp,
@@ -329,6 +471,8 @@ def exec_from_signal(sig: SignalEntry) -> ExecParams | None:
         trail_threshold_pct=_dec(sig.trailing_update_threshold_pct),
         trail_tp_only=bool(sig.trailing_tp_only),
         sl_source=sl_how,
+        partial_trigger_pct=be_t if fix_on else None,
+        partial_close_pct=fix_pct if fix_on else None,
     )
 
 
@@ -451,7 +595,8 @@ def review_signal(
     pg_required: int | None = None,  # режим сделки PGv2: нужно consecutive, СЧИТАЯ свечу касания
     m1_candles: list[Candle] | None = None,  # минутные свечи того же периода; обязательны для T1M/T1L
     slippage_pct: Decimal | float | str | int = 0,  # проскальзывание входа против трейдера, %
-    tf: str = "5m",  # ТФ основного ряда candles; T1L исполняется на нём, M1 — только клиппинг
+    tf: str = "5m",  # ТФ основного ряда candles; T1L исполняется на нём
+    entry_price_override: Decimal | float | str | None = None,  # эталон 1:1 — архивная цена входа
 ) -> HourBounceResult:
     # PG-режим (entry_code "PG", как в confirmation_loop.py:875-989):
     # свеча касания сразу проверяется на in_direction и идёт в счётчик.
@@ -595,6 +740,17 @@ def review_signal(
             )
         entry_price = window[entry_pos].open
         entry_dt = window[entry_pos].open_time
+    if pg_mode and entry_price_override is not None:
+        # Эталон 1:1: живой бот вошёл по архивной цене — используем её вместо
+        # open следующей свечи. Иначе абсолютные SL/TP архива висят на чужой
+        # базе входа и риск-дистанция не совпадает с живой (напр. XRP: вход
+        # реплея +1.11% хуже архивного → SL −2.28% вместо −1.1%).
+        try:
+            _ov = Decimal(str(entry_price_override))
+        except Exception:
+            _ov = None
+        if _ov is not None and _ov > 0:
+            entry_price = _ov
     if ex.sl_price is not None:
         sl_price = ex.sl_price
     elif ex.sl_pct is not None:
@@ -603,33 +759,17 @@ def review_signal(
         raise ValueError("ExecParams has no stop")
     events.append(HbEvent(3, "entry", entry_dt, entry_price))
 
-    # 4. исполнение 1:1 PGv2 (trade_model.tick): BE → активация трейлинга
-    # (строго после BE, если BE задан) → подтяжка (порог) → стоп → TP.
-    be_trig = entry_price * (Decimal(1) + ex.be_trigger_pct / Decimal(100)) if (ex.use_be and is_long and ex.be_trigger_pct is not None) else (
-        entry_price * (Decimal(1) - ex.be_trigger_pct / Decimal(100)) if (ex.use_be and ex.be_trigger_pct is not None) else None)
-    be_lock = entry_price * (Decimal(1) + ex.be_lock_pct / Decimal(100)) if (ex.use_be and is_long and ex.be_lock_pct is not None) else (
-        entry_price * (Decimal(1) - ex.be_lock_pct / Decimal(100)) if (ex.use_be and ex.be_lock_pct is not None) else None)
-    act_price = entry_price * (Decimal(1) + ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and is_long and ex.trail_activation_pct is not None) else (
-        entry_price * (Decimal(1) - ex.trail_activation_pct / Decimal(100)) if (ex.use_trail and ex.trail_activation_pct is not None) else None)
+    # 4. исполнение (политика v5, единый порядок в свече — см. _stop_hit):
+    # гэп → стоп (предпочтительнее) → БУ → частичка → активация трейлинга
+    # (строго после БУ, если БУ задан) → подтяжка (порог) → стоп → TP.
+    # Релокация БУ вступает в силу со следующей свечи (как подтяжка трейлинга).
+    # Лок вне рынка (lock за триггером) — выход по цене триггера: живой
+    # стоп-маркет исполнился бы сразу по рынку.
+    lv = _position_levels(entry_price, is_long, ex)
+    be_trig, be_lock = lv.be_trig, lv.be_lock
+    act_price, tp_price = lv.act_price, lv.tp_price
+    partial_price_trig, partial_frac = lv.partial_trig, lv.partial_frac
     threshold = ex.trail_threshold_pct if ex.trail_threshold_pct is not None else Decimal("0.5")
-    # Фикс-тейк TM1 (% от входа) + архивный абсолютный TP (SIGNAL). TM1-приоритет — tp_pct.
-    tp_price = ex.fixed_tp
-    if ex.tp_pct is not None and ex.tp_pct > 0:
-        tp_price = entry_price * (Decimal(1) + ex.tp_pct / Decimal(100)) if is_long else entry_price * (Decimal(1) - ex.tp_pct / Decimal(100))
-    partial_price_trig = (
-        entry_price * (Decimal(1) + ex.partial_trigger_pct / Decimal(100))
-        if (ex.use_partial and is_long and ex.partial_trigger_pct is not None)
-        else (
-            entry_price * (Decimal(1) - ex.partial_trigger_pct / Decimal(100))
-            if (ex.use_partial and ex.partial_trigger_pct is not None)
-            else None
-        )
-    )
-    partial_frac = (
-        ex.partial_close_pct / Decimal(100)
-        if ex.use_partial and ex.partial_close_pct is not None
-        else None
-    )
     partial_done = False
     partial_dt = None
     partial_px: Decimal | None = None
@@ -662,41 +802,54 @@ def review_signal(
         max_fav = max(max_fav, fav)
         max_adv = max(max_adv, adv)
 
-        # гэп через стоп/трейлинг на open (консервативное дополнение реплея)
-        gap_stop = (c.open <= sl) if is_long else (c.open >= sl)
-        if i > entry_pos and gap_stop:
+        # гэп через стоп/трейлинг на open (консервативное дополнение реплея).
+        if _gapped(is_long, sl, c):
             exit_outcome, exit_kind, exit_dt, exit_price = "STOP", "sl", c.open_time, c.open
             events.append(HbEvent(4, "stop", c.open_time, c.open))
             break
-        if activated and trail is not None:
-            gap_trail = (c.open <= trail) if is_long else (c.open >= trail)
-            if i > entry_pos and gap_trail:
-                exit_outcome, exit_kind, exit_dt, exit_price = "TAKE", "trail", c.open_time, c.open
-                events.append(HbEvent(4, "take", c.open_time, c.open))
-                break
+        if activated and trail is not None and _gapped(is_long, trail, c):
+            exit_outcome, exit_kind, exit_dt, exit_price = "TAKE", "trail", c.open_time, c.open
+            events.append(HbEvent(4, "take", c.open_time, c.open))
+            break
 
         be_was = be_active
+        be_just_hit = False
+        check_tp = tp_price is not None and not (ex.trail_tp_only and activated)
+        tp_hit = check_tp and tp_price is not None and _tp_hit(is_long, tp_price, c)
         # 1. безубыток
         if ex.use_be and not be_active and be_trig is not None and be_lock is not None:
-            hit_be = (c.high >= be_trig) if is_long else (c.low <= be_trig)
-            if hit_be:
-                if (is_long and be_lock > sl) or (not is_long and be_lock < sl):
+            if _touched(is_long, be_trig, c):
+                # Стоп предпочтительнее БУ: та же свеча задела и старый стоп —
+                # выходим по стопу, релокации нет.
+                if _stop_hit(is_long, sl, entry_price, c):
+                    if tp_hit:
+                        ambiguous = True
+                    exit_outcome, exit_kind, exit_dt, exit_price = "STOP", "sl", c.close_time, sl
+                    events.append(HbEvent(4, "stop", c.close_time, sl))
+                    break
+                relocated = (is_long and be_lock > sl) or (not is_long and be_lock < sl)
+                if relocated:
                     sl = be_lock
                     be_price = sl
                 be_active = True
+                be_just_hit = True
                 events.append(HbEvent(4, "breakeven", c.close_time, sl))
-        # 1b. частичная фиксация TM1 (не закрывает сделку, фиксирует долю по триггеру)
+                if relocated and _lock_beyond_market(is_long, be_lock, be_trig):
+                    if tp_hit:
+                        ambiguous = True
+                    exit_outcome, exit_kind, exit_dt, exit_price = "STOP", "sl", c.close_time, be_trig
+                    events.append(HbEvent(4, "stop", c.close_time, be_trig))
+                    break
+        # 1b. частичная фиксация TM1 (только фиксация доли, сделка продолжается)
         if ex.use_partial and not partial_done and partial_price_trig is not None:
-            hit_part = (c.high >= partial_price_trig) if is_long else (c.low <= partial_price_trig)
-            if hit_part:
+            if _touched(is_long, partial_price_trig, c):
                 partial_done = True
                 partial_dt = c.close_time
                 partial_px = partial_price_trig
                 events.append(HbEvent(4, "partial", c.close_time, partial_price_trig))
         # 2. активация трейлинга (строго после BE, если BE задан)
         if ex.use_trail and not activated and act_price is not None and (not ex.use_be or be_was):
-            hit_act = (c.high >= act_price) if is_long else (c.low <= act_price)
-            if hit_act:
+            if _touched(is_long, act_price, c):
                 activated = True
                 extreme = c.high if is_long else c.low
                 last_upd = extreme
@@ -718,16 +871,19 @@ def review_signal(
                         trail = new_trail
                         last_upd = ref
                         trail_path.append({"dt": c.close_time.isoformat(), "trail": str(trail)})
-        # 4-5. эффективный стоп (трейлинг вытесняет базу только в свою сторону)
+        # 4. эффективный стоп: если BE только что сработал — используем СТАРЫЙ стоп на этой свече
+        #    (новая релокация вступает в силу со следующей, как и подтяжка трейлинга)
         eff, from_trail = sl, False
-        if activated and trail is not None and ((is_long and trail > eff) or (not is_long and trail < eff)):
+        if be_just_hit:
+            eff = sl_price  # исходный SL
+        elif activated and trail is not None and ((is_long and trail > eff) or (not is_long and trail < eff)):
             eff, from_trail = trail, True
-        hit_stop = (c.low <= eff) if is_long else (c.high >= eff)
+        # 5. проверка стопа (приоритет над TP; стоп предпочтительнее).
+        # TP пересчитываем здесь: trail_tp_only зависит от активации трейлинга
+        # на этой же свече (ранний tp_hit выше — только для блока БУ).
         check_tp = tp_price is not None and not (ex.trail_tp_only and activated)
-        tp_hit = False
-        if check_tp and tp_price is not None:
-            tp_hit = (c.high >= tp_price) if is_long else (c.low <= tp_price)
-        if hit_stop:
+        tp_hit = check_tp and tp_price is not None and _tp_hit(is_long, tp_price, c)
+        if _stop_hit(is_long, eff, entry_price, c):
             if tp_hit:
                 ambiguous = True
             if from_trail:

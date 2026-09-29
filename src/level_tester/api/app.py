@@ -1060,12 +1060,14 @@ _HB_ID_TS_RE = re.compile(r"^binance_.+_(?:resistance|support)_[\d.]+_(\d{8}_\d{
 
 def _hb_dt_place(signal_id: str | None, placement_date: str | None, created_at: str | None,
                  watch_start: str | None = None) -> tuple[str | None, datetime | None]:
-    """Время выставления уровня (UTC) + якорь сканирования.
+    """Время выставления уровня (UTC).
 
     dt_place: метка в id (детект H1-уровня, UTC) -> placement_date -> created_at.
-    Якорь сканирования: max(dt_place, watch_start) — PGv2 не видел свечей до
-    старта своего confirmation-цикла (рестарты бота), реплей 1:1 тоже не должен.
-    Возвращает (строка для UI, aware-datetime якоря).
+    Фильтр периода, показ, сортировка и equity используют строго place
+    (эталон периода = выставление). `watch_start` игнорируется здесь и
+    учитывается только якорем сканирования (см. `_hb_scan_anchor`): PGv2
+    не видел свечей до старта своего confirmation-цикла (рестарты бота).
+    Возвращает (строка для UI, aware-datetime place).
     """
     m = _HB_ID_TS_RE.match(str(signal_id or ""))
     place: datetime | None = None
@@ -1081,11 +1083,17 @@ def _hb_dt_place(signal_id: str | None, placement_date: str | None, created_at: 
                 break
     if place is None:
         return None, None
-    anchor = place
+    return place.strftime("%Y-%m-%d %H:%M:%S"), place
+
+
+def _hb_scan_anchor(place_dt: datetime | None, watch_start: str | None = None) -> datetime | None:
+    """Якорь сканирования свечей: max(place, watch_start)."""
+    if place_dt is None:
+        return None
     ws = _hb_parse_time(watch_start)
-    if ws is not None and ws > anchor:
-        anchor = ws
-    return place.strftime("%Y-%m-%d %H:%M:%S"), anchor
+    if ws is not None and ws > place_dt:
+        return ws
+    return place_dt
 
 
 def _hb_archive_meta(signal_id: str) -> dict[str, Any]:
@@ -1100,7 +1108,8 @@ def _hb_archive_meta(signal_id: str) -> dict[str, Any]:
         conn = _sqlite3.connect(f"file:{adb.as_posix()}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                "SELECT metadata FROM signal_archive WHERE original_id = ? OR id = ? LIMIT 1",
+                "SELECT metadata, close_reason, exit_price FROM signal_archive"
+                " WHERE original_id = ? OR id = ? LIMIT 1",
                 (signal_id, signal_id),
             ).fetchone()
             if not row or not row[0]:
@@ -1112,6 +1121,10 @@ def _hb_archive_meta(signal_id: str) -> dict[str, Any]:
                 req = int(meta.get("confirmation_bars_required", 2))
             except (TypeError, ValueError):
                 req = 2
+            try:
+                arch_exit = float(row[2]) if row[2] is not None else None
+            except (TypeError, ValueError):
+                arch_exit = None
             return {
                 "placement_date": meta.get("placement_date") or meta.get("timestamp") or meta.get("load_date"),
                 # эталон PGv2: когда стартовал подсчёт баров после касания (UTC ISO)
@@ -1121,6 +1134,10 @@ def _hb_archive_meta(signal_id: str) -> dict[str, Any]:
                 # сканируем от max(dt_place, watch_start), иначе находим касания,
                 # которых живой бот не видел
                 "watch_start": meta.get("confirmation_waiting_started_at"),
+                # для эталона 1:1: чем закрылась живая сделка и по какой цене
+                # (детектор несвежего SL в exec_from_signal)
+                "close_reason": meta.get("close_reason") or row[1],
+                "exit_price": meta.get("exit_price") if meta.get("exit_price") is not None else arch_exit,
             }
         finally:
             conn.close()
@@ -1140,7 +1157,10 @@ def _hb_arch_outcome(status: str | None, close_reason: str | None) -> str:
     return "EXPIRED"
 
 
-_HB_REQ_TO_ENTRY = {0: "T1M", 1: "T2", 2: "T3"}
+# Привязка реальной сделки к ячейке сетки. req=-1 (market on wick без
+# подтверждения) ближе всего к T1M; req=0 (touch + close в направлении) — тоже
+# T1M по смыслу (маркет сразу после касания). Без req привязку не строим.
+_HB_REQ_TO_ENTRY = {-1: "T1M", 0: "T1M", 1: "T2", 2: "T3"}
 _HB_SL_GRID = (0.5, 1.0, 1.5)
 
 
@@ -1442,8 +1462,9 @@ async def hourbounce_signals(
             continue
         extra = arch_extra.get(str(s.signal_id), {})
         outcome_arch = _hb_arch_outcome(extra.get("status"), extra.get("close_reason"))
-        dt_place, dt_place_dt = _hb_dt_place(s.signal_id, extra.get("placement_date"), s.timestamp,
-                                             extra.get("watch_start"))
+        # Эталон периода — place (выставление уровня). Якорь watch_start
+        # используется только для сканирования свечей, не для фильтра.
+        dt_place, dt_place_dt = _hb_dt_place(s.signal_id, extra.get("placement_date"), s.timestamp)
         place_day = dt_place_dt.date().isoformat() if dt_place_dt else None
         if date_from:
             try:
@@ -1516,7 +1537,11 @@ async def hourbounce_signals(
         items.sort(key=lambda d: ((d["symbol"] or ""), (d["dt_place"] or "")))
     else:  # date_desc
         items.sort(key=lambda d: d["dt_place"] or "", reverse=True)
-    return {"items": items[:limit], "count": len(items)}
+    truncated = len(signals) >= 5000
+    return {"items": items[:limit], "count": len(items),
+            "truncated": truncated,
+            "period": {"date_from": date_from or None, "date_to": date_to or None,
+                       "basis": "dt_place"}} 
 
 
 def _hb_resolve_signal(signal_id: str) -> tuple[Any, dict[str, Any], str | None, datetime, str, dict[str, Any]]:
@@ -1527,10 +1552,11 @@ def _hb_resolve_signal(signal_id: str) -> tuple[Any, dict[str, Any], str | None,
         raise HTTPException(status_code=404, detail="signal not found in archive")
     sig = found[0]
     meta = _hb_archive_meta(signal_id)
-    dt_place_str, sig_time = _hb_dt_place(signal_id, meta.get("placement_date"), sig.timestamp,
-                                          meta.get("watch_start"))
-    if sig_time is None:
+    dt_place_str, place_dt = _hb_dt_place(signal_id, meta.get("placement_date"), sig.timestamp)
+    if place_dt is None:
         raise HTTPException(status_code=422, detail="signal has no valid timestamp")
+    # Якорь сканирования свечей: живой бот не видел свечей до watch_start.
+    sig_time = _hb_scan_anchor(place_dt, meta.get("watch_start")) or place_dt
     side = "LONG" if str(sig.side).upper() in ("LONG", "BUY") else "SHORT"
     price_spec = _hb_price_spec(sig.symbol, sig.entry_price)
     return sig, meta, dt_place_str, sig_time, side, price_spec
@@ -1545,7 +1571,8 @@ def _hb_signal_block(sig, meta, dt_place_str, sig_time, side, price_spec, tf: st
         "signal_id": sig.signal_id, "symbol": sig.symbol, "side": side,
         "tf": tf,
         "level_price": sig.entry_price, "dt_place": dt_place_str,
-        "place_ts": place_ts, "place_dt_iso": sig_time.isoformat(),
+        "place_ts": place_ts, "place_dt_iso": dt_place_str,
+        "anchor_dt_iso": sig_time.isoformat(),
         "created_at": sig.timestamp, "touch_ref": meta.get("touch_ref"),
         "tp_arch": sig.take_profits, "sl_arch": sig.stop_loss, "rr_arch": sig.rr_ratio,
         "price_precision": price_spec["price_precision"],
@@ -1748,7 +1775,8 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
     sig, meta, dt_place_str, sig_time, side, price_spec = _hb_resolve_signal(signal_id)
     cfg = config_for_tf(tf)
     step = step_for_tf(tf)
-    ex = exec_from_signal(sig)
+    ex = exec_from_signal(sig, close_reason=meta.get("close_reason"),
+                          exit_price=meta.get("exit_price"))
     if ex is None:
         return {"pg_available": False,
                 "pg_reason": "в архиве нет stop_loss — режим сделки недоступен",
@@ -1766,10 +1794,12 @@ def _hb_build_single(signal_id: str, entry: str, lookforward: int, pre: int,
         raise HTTPException(status_code=502, detail="no candles returned")
 
     res = review_signal(
-        side=side, level_price=Decimal(str(sig.entry_price)), signal_time=sig_time,
+        side=side, level_price=Decimal(str(sig.entry_price)),
+        signal_time=sig_time,
         candles=candles, entry_code="PG", sl_index=0,
         config=cfg, exec_params=ex,
         pg_required=int(meta.get("required_bars", 2)), tf=tf,
+        entry_price_override=sig.entry_price or None,
     )
     all_ts = [c.open_time for c in candles]
     # запас контекста графика — по времени: множитель относительно M5
@@ -2074,18 +2104,82 @@ def _hb_be_base_col(col: str) -> str:
     return col.replace(HB_BE_SUFFIX, "")
 
 
-def _hb_report_columns(with_be: bool) -> list[str]:
+PG_COLUMN = "PG"
+
+
+def _hb_report_columns(with_be: bool, with_pg: bool = True) -> list[str]:
     """Колонки отчёта. С БУ — чередование: колонка +БУ сразу за своей базовой
-    (T1M/SL1, T1M+БУ/SL1, T1M/SL2, ...), а не блоком в конце."""
+    (T1M/SL1, T1M+БУ/SL1, T1M/SL2, ...), а не блоком в конце.
+    PG — эталонная сделка PGv2 1:1 (параметры из архива), всегда последней."""
     if not with_be:
-        return list(HB_REPORT_COLS)
-    out: list[str] = []
-    for base in HB_REPORT_COLS:
-        out.append(base)
-        be_col = base.replace("/SL", f"{HB_BE_SUFFIX}/SL")
-        if be_col in HB_BE_COLS:
-            out.append(be_col)
+        out = list(HB_REPORT_COLS)
+    else:
+        out = []
+        for base in HB_REPORT_COLS:
+            out.append(base)
+            be_col = base.replace("/SL", f"{HB_BE_SUFFIX}/SL")
+            if be_col in HB_BE_COLS:
+                out.append(be_col)
+    if with_pg:
+        out.append(PG_COLUMN)
     return out
+
+
+def _hb_pg_cell(sid: str, tf: str, lookforward: int) -> dict[str, Any]:
+    """Эталонная ячейка PG: параметры сделки из архива (exec_from_signal),
+    вход PG (required баров подряд считая касание, как живой бот).
+    Возвращает {"pnl", "outcome", ...}; при недоступности — pnl 0 / NO_ENTRY.
+    """
+    from level_tester.backtester.hourbounce import (
+        config_for_tf as _pg_cfg_tf,
+        exec_from_signal as _pg_efs,
+        review_signal as _pg_rs,
+        step_for_tf as _pg_step,
+    )
+    from level_tester.infrastructure.hourbounce_store import (
+        load_candles_cached as _pg_lcc,
+    )
+
+    try:
+        sig_obj, meta, _dtp, sig_time, side, _ps = _hb_resolve_signal(sid)
+    except Exception as exc:
+        return {"pnl": 0.0, "outcome": "ERROR", "error": str(exc)[:120]}
+    ex = _pg_efs(sig_obj, close_reason=meta.get("close_reason"),
+                 exit_price=meta.get("exit_price"))
+    if ex is None:
+        return {"pnl": 0.0, "outcome": "NO_ENTRY", "reason": "no_pg_params"}
+    try:
+        req = int(meta.get("required_bars", 2))
+    except (TypeError, ValueError):
+        req = 2
+    try:
+        cfg = _pg_cfg_tf(tf)
+        stp = _pg_step(tf)
+        start = sig_time - 30 * timedelta(minutes=stp)
+        now = datetime.now(UTC)
+        now_floor = now.replace(minute=(now.minute // stp) * stp, second=0, microsecond=0)
+        end = min(sig_time + lookforward * timedelta(minutes=stp), now_floor)
+        candles, _stats = _pg_lcc(
+            session_factory, binance_client, sig_obj.symbol, start, end, refresh=False, tf=tf)
+        if not candles:
+            return {"pnl": 0.0, "outcome": "NO_ENTRY", "reason": "no_data"}
+        res = _pg_rs(
+            side=side, level_price=Decimal(str(sig_obj.entry_price)),
+            signal_time=sig_time, candles=candles, entry_code="PG",
+            sl_index=0, config=cfg, exec_params=ex, pg_required=req, tf=tf,
+            entry_price_override=sig_obj.entry_price or None)
+        cell = _hb_result_json(res, side)
+        pnl = _hb_cell_pnl(
+            {"outcome": cell.get("outcome"), "entry_price": cell.get("entry_price"),
+             "exit_price": cell.get("exit_price"), "entry": "PG",
+             "exit_kind": cell.get("exit_kind")}, side)
+        # PG-вход — маркет (taker) как и T1M/T2/T3: ставка _hb_cell_pnl уже taker.
+        return {"pnl": pnl, "outcome": cell.get("outcome"),
+                "exit_kind": cell.get("exit_kind"),
+                "entry_price": cell.get("entry_price"), "exit_price": cell.get("exit_price")}
+    except Exception as exc:  # noqa: BLE001 - PG-ячейка не роняет строку
+        logger.debug("hourbounce PG cell failed: %s", sid, exc_info=True)
+        return {"pnl": 0.0, "outcome": "ERROR", "error": str(exc)[:120]}
 
 _hb_report_jobs: dict[str, dict[str, Any]] = {}
 _hb_report_counter = 0
@@ -2121,6 +2215,7 @@ class HbReportRequest(BaseModel):
     lookforward: int = Field(default=2000, ge=20, le=100000)
     tf: str = Field(default="5m", pattern=r"^(5m|1m)$")
     with_be: bool = Field(default=False, description="Добавить 12 колонок Grid+БУ (стоп в БУ из конфига)")
+    with_pg: bool = Field(default=True, description="Добавить эталонную колонку PG (сделка 1:1 из архива)")
 
 
 @app.post("/api/hourbounce/report", status_code=202)
@@ -2131,9 +2226,9 @@ async def hourbounce_report_run(request: HbReportRequest) -> dict[str, Any]:
     _hb_report_jobs[job_id] = {
         "status": "pending", "done": 0, "total": len(request.signal_ids),
         "current": "", "result": None, "error": None, "tf": request.tf,
-        "with_be": request.with_be,
+        "with_be": request.with_be, "with_pg": request.with_pg,
     }
-    Thread(target=_run_hb_report, args=(job_id, request.signal_ids, request.lookforward, request.tf, request.with_be), daemon=True).start()
+    Thread(target=_run_hb_report, args=(job_id, request.signal_ids, request.lookforward, request.tf, request.with_be, request.with_pg), daemon=True).start()
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -2190,9 +2285,10 @@ def _hb_archive_trades(signal_ids: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str = "5m",
-                   with_be: bool = False) -> None:
+                   with_be: bool = False, with_pg: bool = True) -> None:
     job = _hb_report_jobs[job_id]
-    columns = _hb_report_columns(with_be)
+    columns = _hb_report_columns(with_be, with_pg)
+    grid_cols = [c for c in columns if c != PG_COLUMN]
     rows: list[dict[str, Any]] = []
     footer = {c: 0.0 for c in columns}
     footer_best = 0.0
@@ -2272,6 +2368,16 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                 cells = {}
                 row_total = 0.0
                 for col in columns:
+                    if col == PG_COLUMN:
+                        pg = _hb_pg_cell(sid, tf, lookforward) if with_pg else {"pnl": 0.0, "outcome": "NO_ENTRY"}
+                        pnl = float(pg.get("pnl") or 0.0)
+                        cells[col] = {"pnl": pnl, "outcome": pg.get("outcome"),
+                                      "exit_kind": pg.get("exit_kind"),
+                                      "entry_price": pg.get("entry_price"),
+                                      "exit_price": pg.get("exit_price")}
+                        d = round(pnl, 2)
+                        footer[col] = round(footer[col] + d, 2)
+                        continue
                     t, s = _hb_be_base_col(col).split("/")
                     by = by_key_be if HB_BE_SUFFIX in col else by_key
                     cell = by.get((t, int(s[2:])))
@@ -2283,8 +2389,9 @@ def _run_hb_report(job_id: str, signal_ids: list[str], lookforward: int, tf: str
                     d = round(pnl, 2)
                     footer[col] = round(footer[col] + d, 2)
                     row_total = round(row_total + pnl, 4)
-                best = max((cells[c]["pnl"] for c in columns), default=0.0)
-                any_hit = any(cells[c]["pnl"] for c in columns)
+                # Лучший — только по сетке (PG — эталон сверки, не вариант выбора).
+                best = max((cells[c]["pnl"] for c in grid_cols), default=0.0)
+                any_hit = any(cells[c]["pnl"] for c in grid_cols)
                 footer_best = round(footer_best + (round(best, 2) if any_hit else 0.0), 2)
                 # числовые метки для сортировки строк (форматы дат в архиве смешанные)
                 _created_dt = _hb_parse_time(sig.get("created_at"))
@@ -2338,16 +2445,18 @@ _hb_tm1_counter = 0
 
 
 class HbReportTm1Request(BaseModel):
+    # Дефолты = живой снапшот PGv2 (см. TRADE_SETTINGS_2026-09-28.md):
+    # SL 1%, TP 5% (RR 5), трейлинг 1.6/0.6, БУ 0.8/0.35, BE-fix 0.8/50.
     signal_ids: list[str] = Field(min_length=1, max_length=5000)
     lookforward: int = Field(default=10000, ge=20, le=100000)
     sl_pct: float = Field(default=1.0, ge=0.05, le=10.0, description="Стоп % от входа")
-    tp_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="Фикс-тейк % от входа, null = нет")
-    trail_activation_pct: float | None = Field(default=1.0, ge=0.05, le=50.0, description="% активации трейлинга")
-    trail_distance_pct: float | None = Field(default=1.0, ge=0.05, le=20.0, description="Размер трейлинга %")
-    be_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="% перевода стопа в БУ")
-    be_lock_pct: float = Field(default=0.1, ge=0.0, le=5.0, description="% лока в БУ от входа")
-    partial_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0, description="% частичной фиксации")
-    partial_close_pct: float | None = Field(default=None, ge=1.0, le=99.0, description="Размер частички % позиции")
+    tp_pct: float | None = Field(default=5.0, ge=0.05, le=50.0, description="Фикс-тейк % от входа, null = нет")
+    trail_activation_pct: float | None = Field(default=1.6, ge=0.05, le=50.0, description="% активации трейлинга")
+    trail_distance_pct: float | None = Field(default=0.6, ge=0.05, le=20.0, description="Размер трейлинга %")
+    be_trigger_pct: float | None = Field(default=0.8, ge=0.05, le=50.0, description="% перевода стопа в БУ")
+    be_lock_pct: float = Field(default=0.35, ge=0.0, le=5.0, description="% лока в БУ от входа")
+    partial_trigger_pct: float | None = Field(default=0.8, ge=0.05, le=50.0, description="% частичной фиксации")
+    partial_close_pct: float | None = Field(default=50.0, ge=1.0, le=99.0, description="Размер частички % позиции")
 
     @field_validator("tp_pct", "trail_activation_pct", "trail_distance_pct",
                      "be_trigger_pct", "partial_trigger_pct", "partial_close_pct",
@@ -2466,6 +2575,79 @@ def _tm1_compute_cell(side: str, entry_price: Any, sig_time: datetime,
     }
 
 
+def _tm1_pg_ref(it: dict[str, Any]) -> dict[str, Any]:
+    """Эталон PG для строки TM1: сделка 1:1 из архива на тех же M1-свечах сессии.
+    Легковесно (без сети): SignalReader + meta + review_signal PG на кешированных свечах."""
+    try:
+        from decimal import Decimal as _Dec
+
+        from level_tester.backtester.hourbounce import config_for_tf as _pcfg
+        from level_tester.backtester.hourbounce import exec_from_signal as _pefs
+        from level_tester.backtester.hourbounce import review_signal as _prs
+
+        candles = it.get("candles") or []
+        if not candles or not it.get("level_price"):
+            return {"pnl": 0.0, "outcome": "NO_ENTRY"}
+        reader = SignalReader(PGV2_TRADING_DB, PGV2_ARCHIVE_DB)
+        found = reader.read(signal_id=it["signal_id"], include_trading=False,
+                            include_archive=True, limit=1)
+        if not found:
+            return {"pnl": 0.0, "outcome": "NO_ENTRY"}
+        sig = found[0]
+        meta = _hb_archive_meta(it["signal_id"])
+        ex = _pefs(sig, close_reason=meta.get("close_reason"),
+                   exit_price=meta.get("exit_price"))
+        if ex is None:
+            return {"pnl": 0.0, "outcome": "NO_ENTRY"}
+        try:
+            req = int(meta.get("required_bars", 2))
+        except (TypeError, ValueError):
+            req = 2
+        sig_time = _hb_parse_time(it.get("sig_time_iso"))
+        if sig_time is None:
+            return {"pnl": 0.0, "outcome": "NO_ENTRY"}
+        res = _prs(side=it["side"], level_price=_Dec(str(it["level_price"])),
+                   signal_time=sig_time, candles=candles, entry_code="PG",
+                   sl_index=0, config=_pcfg("1m"), exec_params=ex,
+                   pg_required=req, tf="1m",
+                   entry_price_override=sig.entry_price or None)
+        cell = _hb_result_json(res, it["side"])
+        pnl = _hb_cell_pnl(
+            {"outcome": cell.get("outcome"), "entry_price": cell.get("entry_price"),
+             "exit_price": cell.get("exit_price"), "entry": "PG",
+             "exit_kind": cell.get("exit_kind")}, it["side"])
+        return {"pnl": pnl, "outcome": cell.get("outcome"),
+                "exit_kind": cell.get("exit_kind")}
+    except Exception:  # noqa: BLE001 - PG-референс не роняет пересчёт
+        logger.debug("tm1 PG ref failed: %s", it.get("signal_id"), exc_info=True)
+        return {"pnl": 0.0, "outcome": "ERROR"}
+
+
+def _tm1_row(meta: dict[str, Any], cell: dict[str, Any], pg: dict[str, Any],
+             arch: dict[str, Any], error: str | None = None) -> dict[str, Any]:
+    """Одна строка TM1-отчёта. Единое место сборки (recalc + фоновый job).
+
+    meta: signal_id/symbol/side/level_price/dt_place/created_at/touch_ref/
+    created_ts/worked_ts. cell: ячейка TM1. pg: эталон PG. arch: статус архива.
+    """
+    row = {
+        "signal_id": meta.get("signal_id"), "symbol": meta.get("symbol") or "?",
+        "side": meta.get("side") or "?",
+        "level_price": meta.get("level_price"), "dt_place": meta.get("dt_place"),
+        "created_at": meta.get("created_at"), "touch_ref": meta.get("touch_ref"),
+        "created_ts": meta.get("created_ts"), "worked_ts": meta.get("worked_ts"),
+        "outcome_arch": None, "cells": {TM1_COLUMN: cell},
+        "row_total": cell.get("pnl", 0.0), "best_pnl": cell.get("pnl", 0.0),
+        "pg_pnl": pg.get("pnl", 0.0), "pg_outcome": pg.get("outcome"),
+        "pg_exit_kind": pg.get("exit_kind"),
+        "arch_status": arch.get("status"), "arch_pnl": arch.get("pnl_percent"),
+        "traded": bool(arch.get("traded")),
+    }
+    if error:
+        row["error"] = str(error)[:200]
+    return row
+
+
 def _tm1_build_rows(sess_items: list[dict[str, Any]], params: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, float]]:
     """Пересчёт всех строк сессии по кешированным свечам. Возвращает (rows, footer)."""
     from level_tester.backtester.hourbounce import config_for_tf
@@ -2497,30 +2679,18 @@ def _tm1_build_rows(sess_items: list[dict[str, Any]], params: dict[str, Any]) ->
             footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
             footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
             row_err = prep_error if (prep_error and c.get("outcome") in ("NO_ENTRY", "ERROR")) else None
-            rows.append({
-                "signal_id": it["signal_id"], "symbol": it.get("symbol") or "?", "side": it.get("side") or "?",
-                "level_price": it.get("level_price"), "dt_place": it.get("dt_place"),
-                "created_at": it.get("created_at"), "touch_ref": it.get("touch_ref"),
-                "created_ts": it.get("created_ts"), "worked_ts": it.get("worked_ts"),
-                "outcome_arch": None, "cells": {TM1_COLUMN: c}, "row_total": c["pnl"],
-                "best_pnl": c["pnl"],
-                "arch_status": it.get("arch_status"), "arch_pnl": it.get("arch_pnl"),
-                "traded": bool(it.get("traded")),
-                **({"error": str(row_err)[:200]} if row_err else {}),
-            })
+            pg = _tm1_pg_ref(it) if it.get("candles") else {"pnl": 0.0, "outcome": "NO_ENTRY"}
+            rows.append(_tm1_row(it, c, pg, {"status": it.get("arch_status"),
+                                             "pnl_percent": it.get("arch_pnl"),
+                                             "traded": it.get("traded")}, row_err))
         except Exception as exc:  # noqa: BLE001 - один битый сигнал не роняет пересчёт
             logger.debug("tm1 recalc signal failed: %s", it.get("signal_id"), exc_info=True)
             err = str(exc)[:200] if str(exc) else (prep_error or "recalc failed")
-            rows.append({"signal_id": it.get("signal_id"), "symbol": it.get("symbol") or "?",
-                         "side": it.get("side") or "?",
-                         "level_price": it.get("level_price"), "dt_place": it.get("dt_place"),
-                         "outcome_arch": None,
-                         "created_at": it.get("created_at"), "touch_ref": it.get("touch_ref"),
-                         "created_ts": it.get("created_ts"), "worked_ts": it.get("worked_ts"),
-                         "cells": {TM1_COLUMN: {"pnl": 0.0, "outcome": "ERROR"}},
-                         "row_total": 0.0, "best_pnl": 0.0, "error": err[:200],
-                         "arch_status": it.get("arch_status"), "arch_pnl": it.get("arch_pnl"),
-                         "traded": bool(it.get("traded"))})
+            rows.append(_tm1_row(it, {"pnl": 0.0, "outcome": "ERROR"},
+                                 {"pnl": 0.0, "outcome": "NO_ENTRY"},
+                                 {"status": it.get("arch_status"),
+                                  "pnl_percent": it.get("arch_pnl"),
+                                  "traded": it.get("traded")}, err))
     return rows, footer
 
 
@@ -2576,13 +2746,20 @@ def _tm1_kpi(rows: list[dict[str, Any]]) -> dict[str, Any]:
         n_partial += 1 if c.get("has_partial") else 0
         n_be += 1 if c.get("has_be") else 0
     total = round(sum(round(v, 2) for v in pnls), 2)
+    avg_win_v = round(gross_win / len(wins), 3) if wins else 0.0
+    avg_loss_v = round(gross_loss / len(losses), 3) if losses else 0.0
+    wr_frac = (len(wins) / len(decided)) if decided else 0.0
+    # Матожидание ТС на решённых сделках (флэт/NO_ENTRY исключены):
+    # EV = wr*avg_win + (1-wr)*avg_loss ≡ avg при decided-логике.
+    expectancy_v = round(wr_frac * avg_win_v + (1 - wr_frac) * avg_loss_v, 3) if decided else 0.0
     return {
         "total": total, "count": len(rows), "decided": len(decided),
         "wins": len(wins), "losses": len(losses),
         "winrate": round(len(wins) / len(decided) * 100, 1) if decided else None,
         "avg": round(total / len(decided), 3) if decided else 0.0,
-        "avg_win": round(gross_win / len(wins), 3) if wins else 0.0,
-        "avg_loss": round(gross_loss / len(losses), 3) if losses else 0.0,
+        "avg_win": avg_win_v,
+        "avg_loss": avg_loss_v,
+        "expectancy": expectancy_v,
         "pf": pf, "max_dd": max_dd,
         "equity": equity, "hist": hist, "mean": mean_v, "median": med_v,
         "outcomes": outcomes, "exits": exits,
@@ -2619,34 +2796,29 @@ def _run_hb_tm1_report(job_id: str, request: HbReportTm1Request) -> None:
                     session_factory, binance_client, sig_obj.symbol,
                     start, end, refresh=False, tf="1m")
                 cell = _tm1_compute_cell(side, sig_obj.entry_price, sig_time, candles, params, cfg)
-                pnl = cell["pnl"]
                 cells = {TM1_COLUMN: cell}
-                d = round(pnl, 2)
+                d = round(cell["pnl"], 2)
                 footer[TM1_COLUMN] = round(footer[TM1_COLUMN] + d, 2)
                 footer["TOTAL"] = round(footer["TOTAL"] + d, 2)
+                pg = _tm1_pg_ref({"signal_id": sid, "side": side,
+                                  "level_price": sig_obj.entry_price,
+                                  "sig_time_iso": sig_time.isoformat(),
+                                  "candles": candles})
                 created_dt = _hb_parse_time(sig_obj.timestamp)
                 worked_dt = _hb_parse_time(_meta.get("touch_ref"))
-                rows.append({
-                    "signal_id": sid, "symbol": sig_obj.symbol, "side": side,
-                    "level_price": sig_obj.entry_price, "dt_place": _dtp,
-                    "created_at": sig_obj.timestamp, "touch_ref": _meta.get("touch_ref"),
-                    "created_ts": int(created_dt.timestamp()) if created_dt else None,
-                    "worked_ts": int(worked_dt.timestamp()) if worked_dt else None,
-                    "outcome_arch": None, "cells": cells, "row_total": pnl,
-                    "best_pnl": pnl,
-                    "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
-                    "traded": bool(info.get("traded")),
-                })
+                rows.append(_tm1_row(
+                    {"signal_id": sid, "symbol": sig_obj.symbol, "side": side,
+                     "level_price": sig_obj.entry_price, "dt_place": _dtp,
+                     "created_at": sig_obj.timestamp, "touch_ref": _meta.get("touch_ref"),
+                     "created_ts": int(created_dt.timestamp()) if created_dt else None,
+                     "worked_ts": int(worked_dt.timestamp()) if worked_dt else None},
+                    cells[TM1_COLUMN], pg, info))
             except Exception as exc:  # noqa: BLE001 - один битый сигнал не роняет отчёт
                 logger.debug("hourbounce TM1 report signal failed: %s", sid, exc_info=True)
-                rows.append({"signal_id": sid, "symbol": "?", "side": "?",
-                             "level_price": None, "dt_place": None, "outcome_arch": None,
-                             "created_at": None, "touch_ref": None,
-                             "created_ts": None, "worked_ts": None,
-                             "cells": {TM1_COLUMN: {"pnl": 0.0, "outcome": "ERROR"}},
-                             "row_total": 0.0, "best_pnl": 0.0, "error": str(exc)[:200],
-                             "arch_status": info.get("status"), "arch_pnl": info.get("pnl_percent"),
-                             "traded": bool(info.get("traded"))})
+                rows.append(_tm1_row(
+                    {"signal_id": sid},
+                    {"pnl": 0.0, "outcome": "ERROR"},
+                    {"pnl": 0.0, "outcome": "NO_ENTRY"}, info, str(exc)[:200]))
             job["done"] = i + 1
         job["result"] = {"columns": columns, "rows": rows, "footer": footer,
                          "count": len(rows), "tf": "1m", "entry": "T1M",
@@ -2697,15 +2869,16 @@ class HbTm1PrepareRequest(BaseModel):
 
 
 class HbTm1RecalcRequest(BaseModel):
+    # Дефолты = живой снапшот PGv2 (UI всегда шлёт явные значения с бегунков).
     session_id: str = Field(min_length=1)
     sl_pct: float = Field(default=1.0, ge=0.05, le=10.0)
-    tp_pct: float | None = Field(default=None, ge=0.05, le=50.0)
-    trail_activation_pct: float | None = Field(default=1.0, ge=0.05, le=50.0)
-    trail_distance_pct: float | None = Field(default=1.0, ge=0.05, le=20.0)
-    be_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0)
-    be_lock_pct: float = Field(default=0.1, ge=0.0, le=5.0)
-    partial_trigger_pct: float | None = Field(default=None, ge=0.05, le=50.0)
-    partial_close_pct: float | None = Field(default=None, ge=1.0, le=99.0)
+    tp_pct: float | None = Field(default=5.0, ge=0.05, le=50.0)
+    trail_activation_pct: float | None = Field(default=1.6, ge=0.05, le=50.0)
+    trail_distance_pct: float | None = Field(default=0.6, ge=0.05, le=20.0)
+    be_trigger_pct: float | None = Field(default=0.8, ge=0.05, le=50.0)
+    be_lock_pct: float = Field(default=0.35, ge=0.0, le=5.0)
+    partial_trigger_pct: float | None = Field(default=0.8, ge=0.05, le=50.0)
+    partial_close_pct: float | None = Field(default=50.0, ge=1.0, le=99.0)
 
     @field_validator("tp_pct", "trail_activation_pct", "trail_distance_pct",
                      "be_trigger_pct", "partial_trigger_pct", "partial_close_pct",

@@ -141,29 +141,32 @@ label.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim
 <div style="overflow:auto"><table id="heat-tbl"></table></div>
 </div>
 <div class="wrap" id="wrap" style="display:none"><table id="tbl"></table></div>
-<div class="hint">Наведи на клетку — увидишь исход и выход (◐ = была частичка, ⬈ = был перевод в БУ). Порядок в свече M1: БУ → частичка (фикс доли, сделка продолжается) → активация трейлинга (строго после БУ, если БУ задан) → подтяжка → стоп → фикс-TP. Пустой бегунок = механизм выключен. Сессия кеша живёт 30 минут (макс. 3 сессии).</div>
+<div class="hint">Наведи на клетку — увидишь исход и выход (◐ = была частичка, ⬈ = был перевод в БУ). Порядок в свече M1 как в проде PGv2: БУ → частичка (фикс доли, сделка продолжается) → активация трейлинга (строго после БУ, если БУ задан) → подтяжка (порог 0.1%) → стоп → фикс-TP. ✋ = закрыто оператором вручную (расхождение модели с фактом ожидаемо). Дефолты бегунков = живой конфиг PGv2 (SL 1%, TP 5%, трейлинг 1.6/0.6, БУ 0.8/0.35, частичка 0.8/50). Пустой бегунок = механизм выключен. Сессия кеша живёт 30 минут (макс. 3 сессии).</div>
 </main>
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
 let lastData = null, sessionId = null, recalcSeq = 0, recalcTimer = null, recalcAbort = null;
-const LS_KEY = 'hb-tm1-settings-v2';
+const LS_KEY = 'hb-tm1-settings-v3';
 
 // Спецификация бегунков: key, подпись, min/max/step, дефолт, группа вкл/выкл.
+// Дефолты = живой снапшот PGv2 (TRADE_SETTINGS_2026-09-28 + config.yaml):
+// SL 1%, TP 5% (RR 5), трейлинг 1.6/0.6 (порог 0.1%), БУ 0.8/0.35,
+// частичка = BE-fix 0.8/50 — чтобы из коробки TM1 был ближе всего к реалу.
 const PGROUPS = [
-  { gid: 'tp', label: 'Тейк %', on: false },
+  { gid: 'tp', label: 'Тейк %', on: true },
   { gid: 'trail', label: 'Трейлинг', on: true },
-  { gid: 'be', label: 'Безубыток', on: false },
-  { gid: 'part', label: 'Частичка', on: false },
+  { gid: 'be', label: 'Безубыток', on: true },
+  { gid: 'part', label: 'Частичка', on: true },
 ];
 const PSPEC = [
   { key: 'sl_pct', label: 'Стоп %', min: 0.05, max: 3, step: 0.05, def: 1.0, gid: null },
-  { key: 'tp_pct', label: 'Тейк %', min: 0.1, max: 5, step: 0.05, def: 2.0, gid: 'tp' },
-  { key: 'trail_activation_pct', label: 'Трейлинг: актив. %', min: 0.1, max: 5, step: 0.05, def: 1.0, gid: 'trail' },
-  { key: 'trail_distance_pct', label: 'Трейлинг: размер %', min: 0.1, max: 5, step: 0.05, def: 1.0, gid: 'trail' },
-  { key: 'be_trigger_pct', label: 'БУ: триггер %', min: 0.1, max: 5, step: 0.05, def: 0.9, gid: 'be' },
-  { key: 'be_lock_pct', label: 'БУ: лок %', min: 0, max: 1, step: 0.05, def: 0.1, gid: 'be' },
-  { key: 'partial_trigger_pct', label: 'Частичка: триггер %', min: 0.1, max: 5, step: 0.05, def: 0.5, gid: 'part' },
+  { key: 'tp_pct', label: 'Тейк %', min: 0.1, max: 5, step: 0.05, def: 5.0, gid: 'tp' },
+  { key: 'trail_activation_pct', label: 'Трейлинг: актив. %', min: 0.1, max: 5, step: 0.05, def: 1.6, gid: 'trail' },
+  { key: 'trail_distance_pct', label: 'Трейлинг: размер %', min: 0.1, max: 5, step: 0.05, def: 0.6, gid: 'trail' },
+  { key: 'be_trigger_pct', label: 'БУ: триггер %', min: 0.1, max: 5, step: 0.05, def: 0.8, gid: 'be' },
+  { key: 'be_lock_pct', label: 'БУ: лок %', min: 0, max: 1, step: 0.05, def: 0.35, gid: 'be' },
+  { key: 'partial_trigger_pct', label: 'Частичка: триггер %', min: 0.1, max: 5, step: 0.05, def: 0.8, gid: 'part' },
   { key: 'partial_close_pct', label: 'Частичка: размер %', min: 1, max: 90, step: 1, def: 50, gid: 'part' },
 ];
 const HEAT_KEYS = PSPEC.map((p) => p.key);
@@ -293,22 +296,23 @@ document.querySelectorAll('[data-period]').forEach((b) => {
   b.addEventListener('click', () => {
     document.querySelectorAll('[data-period]').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
-    // Календарные периоды (не скользящие дни): неделя пн–вс, месяц, квартал.
+    // Календарные периоды в UTC (не скользящие дни, не локальная TZ):
+    // неделя пн–вс, месяц, квартал. Совпадают с фильтром dt_place (UTC).
     const now = new Date();
-    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
-    const iso = (t) => `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    const y = now.getUTCFullYear(), m = now.getUTCMonth(), d = now.getUTCDate();
+    const iso = (t) => `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
     let from, to;
     if (b.dataset.period === 'week') {
-      const dow = (now.getDay() + 6) % 7; // пн=0
-      from = new Date(y, m, d - dow);
-      to = new Date(y, m, d - dow + 6);
+      const dow = (now.getUTCDay() + 6) % 7; // пн=0
+      from = new Date(Date.UTC(y, m, d - dow));
+      to = new Date(Date.UTC(y, m, d - dow + 6));
     } else if (b.dataset.period === 'month') {
-      from = new Date(y, m, 1);
-      to = new Date(y, m + 1, 0);
+      from = new Date(Date.UTC(y, m, 1));
+      to = new Date(Date.UTC(y, m + 1, 0));
     } else {
       const q = Math.floor(m / 3) * 3;
-      from = new Date(y, q, 1);
-      to = new Date(y, q + 3, 0);
+      from = new Date(Date.UTC(y, q, 1));
+      to = new Date(Date.UTC(y, q + 3, 0));
     }
     $('f-from').value = iso(from); $('f-to').value = iso(to);
     saveSettings();
@@ -317,7 +321,15 @@ document.querySelectorAll('[data-period]').forEach((b) => {
 ['f-from', 'f-to'].forEach((id) => $(id).addEventListener('change', () => {
   document.querySelectorAll('[data-period]').forEach((x) => x.classList.remove('on'));
   saveSettings();
+  // Период сменился — замороженная M1-сессия больше не соответствует выборке.
+  if (sessionId) setLive('', `период изменён (${$('f-from').value || '…'}…${$('f-to').value || '…'}) — нажмите «Сформировать»`);
 }));
+['f-search', 'f-side', 'f-limit', 'f-traded'].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener('change', () => {
+    if (sessionId) setLive('', 'фильтр изменён — нажмите «Сформировать»');
+  });
+});
 
 // --- Тяжёлая фаза: prepare (свечи M1 один раз) ---
 $('btn-run').onclick = async () => {
@@ -337,6 +349,8 @@ $('btn-run').onclick = async () => {
     if ($('f-to').value) q.set('date_to', $('f-to').value);
     if ($('f-traded').checked) q.set('traded_only', 'true');
     const s = await api('/api/hourbounce/signals?' + q.toString());
+    if (s.truncated) $('status').textContent = `Внимание: архив обрезан предсрезом 5000 по created_at — дальние периоды могут быть неполными.`;
+    const perTxt = `период по выставлению: ${$('f-from').value || '…'}…${$('f-to').value || '…'}`;
     let items = s.items || [];
     if (stopTake) items = items.filter((x) => ['STOP', 'TAKE'].includes(String(x.outcome_arch || '').toUpperCase()));
     const ids = items.map((x) => x.signal_id);
@@ -423,7 +437,7 @@ function renderAll(data) {
   $('charts').classList.add('on');
   const p = data.params || {};
   const nErr = (data.rows || []).filter((r) => r.error).length;
-  $('status').textContent = `Готово [M1 · T1M · SL ${p.sl_pct}% · TP ${p.tp_pct ?? '—'} · trail ${p.trail_activation_pct ?? '—'}/${p.trail_distance_pct ?? '—'} · БУ ${p.be_trigger_pct ?? '—'}/${p.be_lock_pct} · часть ${p.partial_trigger_pct ?? '—'}/${p.partial_close_pct ?? '—'}]: ${data.count} сигналов${nErr ? ` · ОШИБОК: ${nErr} (наведите на красный бейдж в строке)` : ''}.`;
+  $('status').textContent = `Готово [M1 · T1M · SL ${p.sl_pct}% · TP ${p.tp_pct ?? '—'} · trail ${p.trail_activation_pct ?? '—'}/${p.trail_distance_pct ?? '—'} · БУ ${p.be_trigger_pct ?? '—'}/${p.be_lock_pct} · часть ${p.partial_trigger_pct ?? '—'}/${p.partial_close_pct ?? '—'}]: ${data.count} сигналов · период по выставлению ${$('f-from').value || '…'}…${$('f-to').value || '…'}${nErr ? ` · ОШИБОК: ${nErr} (наведите на красный бейдж в строке)` : ''}.`;
 }
 function renderKpi(k) {
   const cell = (t, v, cls) => `<div class="kpi"><div class="k">${t}</div><div class="v ${cls || ''}">${v}</div></div>`;
@@ -432,6 +446,7 @@ function renderKpi(k) {
     cell('Σ PnL %', s(k.total)) +
     cell('Сделок / решено', `${k.decided ?? 0} / ${k.count ?? 0}`) +
     cell('Winrate', k.winrate != null ? `${k.winrate}% (${k.wins}/${k.decided})` : '—', k.winrate >= 50 ? 'pos' : 'neg') +
+    cell('Матожидание %', k.expectancy != null ? s(k.expectancy) : '—') +
     cell('PF', k.pf == null ? '—' : (k.pf === Infinity ? '∞' : k.pf)) +
     cell('Среднее', s(k.avg)) +
     cell('Max просадка', s(k.max_dd)) +
@@ -631,7 +646,7 @@ function renderTable(data, groupMode) {
   const t = $('tbl');
   const cols = data.columns;
   data = Object.assign({}, data, { rows: sortedRows(data.rows) });
-  let h = `<thead><tr><th>Сигнал</th><th title="Реальная сделка в архиве БД">Arch факт</th>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>`;
+  let h = `<thead><tr><th>Сигнал</th><th title="Реальная сделка в архиве БД">Arch факт</th>${cols.map((c) => `<th>${c}</th>`).join('')}<th title="Эталон PGv2 1:1: параметры сделки из архива на тех же M1-свечах">PG (эталон)</th></tr></thead><tbody>`;
   const groups = {};
   const order = [];
   const gkey = (r) => groupMode === 'none' ? '' : groupKey(r, groupMode);
@@ -656,22 +671,27 @@ function renderTable(data, groupMode) {
       });
       const n = groups[k].length;
       const nTr = groups[k].filter((r) => r.traded).length;
+      let gPg = 0;
+      groups[k].forEach((r) => { gPg = Math.round((gPg + Math.round((Number(r.pg_pnl) || 0) * 100) / 100) * 100) / 100; });
+      const pgF = fmtV(gPg);
       h += `<tr class="grp"><td>▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''} · Σ PnL</td><td></td>`;
       for (const c of cols) { const f = fmtV(sums[c]); h += `<td class="${f.cls}">${f.txt}</td>`; }
-      h += `</tr>`;
+      h += `<td class="${pgF.cls}">${pgF.txt}</td></tr>`;
       h += `<tr class="grp" style="font-weight:400;"><td style="padding-left:18px;">↳ ${k} — winrate</td><td></td>`;
       for (const c of cols) { const f = fmtWR(stats[c].w, stats[c].d); h += `<td class="${f.cls}">${f.txt}</td>`; }
-      h += `</tr>`;
+      h += `<td></td></tr>`;
     }
     for (const r of data.rows.filter((x) => gkey(x) === k)) {
+      const isManual = typeof r.arch_status === 'string' && r.arch_status.startsWith('closed_manual');
       const archTxt = r.traded
-        ? `${r.arch_status || ''} ${r.arch_pnl != null ? `${Number(r.arch_pnl) > 0 ? '+' : ''}${Number(r.arch_pnl).toFixed(2)}%` : ''}`
+        ? `${isManual ? '✋ ' : ''}${r.arch_status || ''} ${r.arch_pnl != null ? `${Number(r.arch_pnl) > 0 ? '+' : ''}${Number(r.arch_pnl).toFixed(2)}%` : ''}`
         : '—';
       const archPnl = r.arch_pnl != null ? Number(r.arch_pnl) : null;
       const archCls = !r.traded ? 'zero' : (archPnl != null && Number.isFinite(archPnl) ? (archPnl > 0 ? 'pos' : archPnl < 0 ? 'neg' : 'zero') : 'pos');
+      const archTitle = isManual ? 'Закрыто оператором вручную — расхождение модели с фактом ожидаемо, за ним не гонимся' : 'Реальная сделка в архиве БД';
       const errBadge = r.error ? `<span style="display:inline-block;background:#ef5350;color:#fff;font-weight:700;border-radius:8px;padding:0 6px;margin-right:6px;font-size:10px;" title="Ошибка расчёта: ${(r.error || '').replace(/"/g, '&quot;')}">ERROR</span>` : '';
       h += `<tr${r.traded ? ' class="traded"' : ''}><td title="${r.error ? `ОШИБКА: ${r.error} · ` : ''}${r.signal_id}">${errBadge}${r.traded ? '<span class="trdot" title="Отторговано в БД"></span>' : ''}${r.symbol} · ${r.side} · ${r.level_price} · ${(r.dt_place || '').slice(0, 16)}</td>`;
-      h += `<td class="${archCls}">${archTxt}</td>`;
+      h += `<td class="${archCls}" title="${archTitle}">${archTxt}</td>`;
       for (const c of cols) {
         const cell = ((r.cells || {})[c]) || {};
         const v = Number(cell.pnl) || 0;
@@ -680,24 +700,45 @@ function renderTable(data, groupMode) {
         const title = `${cell.outcome || ''} · выход ${cell.exit_kind || '—'} ${cell.exit_price || ''}${flags}`;
         h += `<td class="${cls}" title="${title}">${v > 0 ? '+' : ''}${v.toFixed(2)}${cell.has_partial ? '◐' : ''}</td>`;
       }
+      {
+        const pv = Number(r.pg_pnl) || 0;
+        const pcls = pv > 0 ? 'pos' : pv < 0 ? 'neg' : 'zero';
+        h += `<td class="${pcls}" title="PG эталон: ${r.pg_outcome || ''} · выход ${r.pg_exit_kind || '—'}">${pv > 0 ? '+' : ''}${pv.toFixed(2)}</td>`;
+      }
       h += `</tr>`;
     }
   }
   h += `</tbody><tfoot><tr><td>Σ столбец (PnL)</td><td></td>`;
   for (const c of cols) { const f = fmtV(Number((data.footer || {})[c]) || 0); h += `<td class="${f.cls}">${f.txt}</td>`; }
+  {
+    let pgSum = 0;
+    (data.rows || []).forEach((r) => { pgSum = Math.round((pgSum + Math.round((Number(r.pg_pnl) || 0) * 100) / 100) * 100) / 100; });
+    const pf = fmtV(pgSum);
+    h += `<td class="${pf.cls}">${pf.txt}</td>`;
+  }
   h += `</tr>`;
   const fstats = {};
-  cols.forEach((c) => { fstats[c] = { w: 0, d: 0 }; });
+  cols.forEach((c) => { fstats[c] = { w: 0, d: 0, sw: 0, sl: 0 }; });
   (data.rows || []).forEach((r) => {
     cols.forEach((c) => {
       const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
-      if (v > 0) fstats[c].w += 1;
+      if (v > 0) { fstats[c].w += 1; fstats[c].sw += v; }
       if (v !== 0) fstats[c].d += 1;
+      if (v < 0) fstats[c].sl += v;
     });
   });
+  const fmtEV = (st) => {
+    if (!st.d) return { txt: '—', cls: 'zero' };
+    const aw = st.w ? st.sw / st.w : 0, al = (st.d - st.w) ? (st.sl / (st.d - st.w)) : 0;
+    const ev = (st.w / st.d) * aw + ((st.d - st.w) / st.d) * al;
+    return { txt: `${ev > 0 ? '+' : ''}${ev.toFixed(2)}`, cls: ev > 0 ? 'pos' : ev < 0 ? 'neg' : 'zero' };
+  };
   h += `<tr><td>WR столбец (winrate)</td><td></td>`;
   for (const c of cols) { const f = fmtWR(fstats[c].w, fstats[c].d); h += `<td class="${f.cls}">${f.txt}</td>`; }
-  h += `</tr></tfoot>`;
+  h += `<td></td></tr>`;
+  h += `<tr><td title="Матожидание = wr*avg_win+(1-wr)*avg_loss на решённых (без флэта)">EV столбец (матожидание)</td><td></td>`;
+  for (const c of cols) { const f = fmtEV(fstats[c]); h += `<td class="${f.cls}">${f.txt}</td>`; }
+  h += `<td></td></tr></tfoot>`;
   t.innerHTML = h;
   $('wrap').style.display = '';
 }
@@ -792,6 +833,12 @@ $('btn-csv').onclick = () => {
   lines.push(['TOTAL', '', '', '', '', '', '', '',
     ...cols.map((cc) => String(Number((lastData.footer || {})[cc]) || 0).replace('.', ',')),
     '', '', '', '', '', '', '', '', '', '', '', ''].join(';'));
+  {
+    const k = lastData.kpi || {};
+    lines.push(['EV матожидание', '', '', '', '', '', '', '',
+      ...cols.map(() => String(k.expectancy ?? '').replace('.', ',')),
+      '', '', '', '', '', '', '', '', '', '', '', ''].join(';'));
+  }
   const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

@@ -314,7 +314,9 @@ def test_breakeven_moves_sl_long():
 def test_breakeven_then_trail_gating_short():
     # SHORT: трейлинг активируется только после BE (строгое правило PGv2):
     # свеча 1 могла бы активировать trail, но BE ещё не было -> блок;
-    # свеча 2: BE уже активен -> trail on -> выход по трейлингу
+    # свеча 2: BE уже активен -> trail on. Но выход по трейлингу в той же свече
+    # НЕ происходит, так как свеча открывается ВЫШЕ трейлинга и уходит вниз
+    # (продолжение движения, а не пуллбэк). Результат EXPIRED.
     from level_tester.backtester.hourbounce import ExecParams
     cs = mk(
         px=[Decimal("99.7"), Decimal("99.4"), Decimal("98.5")],
@@ -327,10 +329,118 @@ def test_breakeven_then_trail_gating_short():
     r = review_signal(side="SHORT", level_price=Decimal("100"), signal_time=BASE,
                       candles=cs, entry_code="T1", sl_index=1, exec_params=ex,
                       config=cfg(life_window_t=10))
-    assert r.outcome == "TAKE" and r.exit_kind == "trail"
-    assert r.exit_price == Decimal("98.8920")
+    assert r.outcome == "EXPIRED"
     assert any(e.type == "breakeven" for e in r.events)
     assert len(r.trail_path) == 1  # активация только на свече 2
+
+
+def test_be_fix_partial_weighted_exit_like_pg():
+    # Механика продa PGv2 (engine.py:4802-4909): TP_BE закрывает 50% по цене
+    # триггера +0.8%, остаток уезжает в БУ +0.35%; разворот бьёт новый SL.
+    # Взвешенный выход: 0.5*100.8 + 0.5*100.35 = 100.575 (+0.575% гросс).
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.5"), Decimal("100.7"), Decimal("100.4")],
+        opens=[Decimal("100.5"), Decimal("100.5"), Decimal("100.7")],
+        lows=[Decimal("99.9"), Decimal("100.4"), Decimal("100.3")],
+        highs=[Decimal("100.6"), Decimal("100.9"), Decimal("100.75")],
+    )
+    ex = ExecParams(sl_pct=Decimal(1), be_trigger_pct=Decimal("0.8"),
+                    be_lock_pct=Decimal("0.35"),
+                    partial_trigger_pct=Decimal("0.8"), partial_close_pct=Decimal(50),
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal(100), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex)
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_price == Decimal("100.575")
+    assert r.partial_price == Decimal("100.8")
+    assert any(e.type == "partial" for e in r.events)
+    assert any(e.type == "breakeven" for e in r.events)
+    assert abs(float(r.gross_pnl_pct) - 0.575) < 1e-9
+
+
+def test_v5_stop_beats_be_on_same_candle():
+    # v5: та же свеча задела старый SL и триггер БУ — выходим по СТАРОМУ стопу,
+    # релокации нет (события breakeven нет).
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.5"), Decimal("100.0")],
+        opens=[Decimal("101"), Decimal("100.5")],
+        lows=[Decimal("98.9"), Decimal("98.5")],
+        highs=[Decimal("101.2"), Decimal("100.6")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), be_trigger_pct=Decimal("0.5"), be_lock_pct=Decimal("0.2"),
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex)
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_price == Decimal("99.0")  # исходный SL, а не лок 100.2
+    assert not any(e.type == "breakeven" for e in r.events)
+
+
+def test_v5_marketable_be_lock_exits_at_trigger():
+    # v5: лок вне рынка (lock 1.0% за триггером 0.2%) — живой стоп-маркет
+    # исполнился бы сразу: выходим по цене ТРИГГЕРА, а не лока.
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.0"), Decimal("100.25")],
+        opens=[Decimal("100.05"), Decimal("100.1")],
+        lows=[Decimal("99.9"), Decimal("99.5")],
+        highs=[Decimal("100.1"), Decimal("100.3")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), be_trigger_pct=Decimal("0.2"), be_lock_pct=Decimal("1.0"),
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex)
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_price == Decimal("100.2")  # триггер, а не лок 101.0
+    assert any(e.type == "breakeven" for e in r.events)
+
+
+def test_v5_profit_lock_hit_only_on_pullback():
+    # v5: лок в зоне прибыли (100.35) бьёт только на пуллбэке:
+    # свеча открылась ВЫШЕ лока и спустилась к нему.
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.3"), Decimal("100.9"), Decimal("100.2")],
+        opens=[Decimal("100.05"), Decimal("100.5"), Decimal("100.9")],
+        lows=[Decimal("99.9"), Decimal("100.5"), Decimal("100.1")],
+        highs=[Decimal("100.5"), Decimal("101.0"), Decimal("101.0")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), be_trigger_pct=Decimal("0.8"), be_lock_pct=Decimal("0.35"),
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex,
+                      config=cfg(life_window_t=10))
+    assert r.outcome == "STOP" and r.exit_kind == "sl"
+    assert r.exit_price == Decimal("100.35")
+
+
+def test_v5_profit_lock_not_hit_on_continuation():
+    # v5: свеча открылась ВЫШЕ лока (100.5 > 100.35) и не спустилась к нему
+    # (low 100.4 > 100.35) — продолжения без пуллбэка: выхода нет.
+    # Свечей больше нет -> EXPIRED. (А свеча с open НИЖЕ лока выбила бы
+    # стоп на open — как живой стоп-маркет.)
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.3"), Decimal("100.9"), Decimal("100.8")],
+        opens=[Decimal("100.05"), Decimal("100.5"), Decimal("100.5")],
+        lows=[Decimal("99.9"), Decimal("100.5"), Decimal("100.4")],
+        highs=[Decimal("100.5"), Decimal("101.0"), Decimal("101.2")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), be_trigger_pct=Decimal("0.8"), be_lock_pct=Decimal("0.35"),
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, exec_params=ex,
+                      config=cfg(life_window_t=10))
+    assert r.outcome == "EXPIRED"
+    assert any(e.type == "breakeven" for e in r.events)
+
+
+def test_tm1_exec_default_trail_threshold_matches_pg():
+    from level_tester.backtester.hourbounce import tm1_exec
+    assert tm1_exec(sl_pct=1.0).trail_threshold_pct == Decimal("0.1")
+    assert tm1_exec(sl_pct=1.0, trail_threshold_pct=0).trail_threshold_pct == Decimal(0)
 
 
 def test_fixed_tp_exit():
@@ -361,8 +471,11 @@ def test_tp_only_skips_fixed_tp():
                     trail_activation_pct=Decimal("0.5"), trail_distance_pct=Decimal("0.5"))
     r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
                       candles=cs, entry_code="T1", sl_index=1, exec_params=ex)
-    assert r.outcome == "TAKE" and r.exit_kind == "trail"
-    assert r.exit_price == Decimal("101.1915")
+    # Трейлинг активируется на свече 1 (high=101.7 >= 100.5), trail=101.1915.
+    # Но выход по трейлингу в той же свече не происходит: свеча открывается НИЖЕ трейлинга
+    # и уходит вверх (продолжение). TP фиксированный игнорируется (trail_tp_only).
+    # Результат EXPIRED.
+    assert r.outcome == "EXPIRED"
 
 
 def test_trail_threshold_blocks_small_updates():
@@ -390,6 +503,7 @@ def test_exec_from_signal_mapping():
         stop_loss=0.03764, rr_ratio=None, timeframe="1h", timestamp="2026-09-08 07:53:53",
         source="archive", take_profits="[0.03615]",
         breakeven_enabled=True, breakeven_trigger_pct=0.9, breakeven_profit_pct=0.35,
+        breakeven_fix_enabled=True, breakeven_fix_pct=50.0,
         trailing_stop_enabled=True, trailing_activation_pct=1.0, trailing_stop_pct=0.6,
         trailing_update_threshold_pct=0.2, trailing_tp_only=False,
     )
@@ -400,6 +514,13 @@ def test_exec_from_signal_mapping():
     assert ex.be_trigger_pct == Decimal("0.9") and ex.be_lock_pct == Decimal("0.35")
     assert ex.trail_activation_pct == Decimal("1.0") and ex.trail_distance_pct == Decimal("0.6")
     assert ex.trail_threshold_pct == Decimal("0.2") and not ex.trail_tp_only
+    # BE-fix продa маппится в частичку по цене триггера БУ
+    assert ex.use_partial
+    assert ex.partial_trigger_pct == Decimal("0.9") and ex.partial_close_pct == Decimal(50)
+    # fix выключен — частички нет
+    from dataclasses import replace as _replace
+    nofix = _replace(sig, breakeven_fix_enabled=False)
+    assert exec_from_signal(nofix) is not None and not exec_from_signal(nofix).use_partial
     bad = SignalEntry(
         signal_id="y", symbol="Z", side="LONG", entry_price=100.0,
         stop_loss=None, rr_ratio=None, timeframe="1h", timestamp=None, source="archive",
@@ -415,6 +536,70 @@ def test_exec_from_signal_mapping():
         stop_loss_source="manual",
     )
     assert exec_from_signal(bad2) is None
+
+
+def test_exec_from_signal_stale_sl_detected():
+    # INJUSDT-кейс: флаги чистые (0/0), но выход sl_filled вдали от записанного
+    # SL (6.121 против 6.241, ~1.9%) — стоп двигали без флага -> config-фолбэк.
+    from level_tester.backtester.hourbounce import exec_from_signal
+    from level_tester.backtester.signal_reader import SignalEntry
+    sig = SignalEntry(
+        signal_id="inj", symbol="INJUSDT", side="SHORT", entry_price=6.177,
+        stop_loss=6.241, rr_ratio=None, timeframe="1h", timestamp="2026-09-14",
+        source="archive", take_profits="[5.87]",
+        breakeven_enabled=True, breakeven_trigger_pct=0.9, breakeven_profit_pct=0.35,
+        breakeven_fix_enabled=False,
+        trailing_stop_enabled=True, trailing_activation_pct=1.0, trailing_stop_pct=0.6,
+        trailing_activated=False, sl_moved_to_breakeven=False,
+    )
+    assert exec_from_signal(sig) is not None
+    assert exec_from_signal(sig).sl_source == "archive"
+    stale = exec_from_signal(sig, close_reason="sl_filled", exit_price=6.121)
+    assert stale is not None and stale.sl_source == "config"
+    # выход почти в SL (проскальзывание) — не считаем несвежим
+    fresh = exec_from_signal(sig, close_reason="sl_filled", exit_price=6.243)
+    assert fresh is not None and fresh.sl_source == "archive"
+
+
+def test_pg_entry_price_override():
+    # Эталон 1:1: вход строго по архивной цене, а не по open следующей свечи.
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.5"), Decimal("101.5"), Decimal("102.0")],
+        opens=[Decimal("100.2"), Decimal("100.5"), Decimal("101.5")],
+        lows=[Decimal("99.9"), Decimal("100.4"), Decimal("101.4")],
+        highs=[Decimal("100.6"), Decimal("101.6"), Decimal("102.1")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), be_trigger_pct=None, be_lock_pct=None,
+                    trail_activation_pct=None, trail_distance_pct=None)
+    plain = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                          candles=cs, entry_code="PG", sl_index=1, config=cfg(life_window_t=10),
+                          exec_params=ex, pg_required=1)
+    fixed = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                          candles=cs, entry_code="PG", sl_index=1, config=cfg(life_window_t=10),
+                          exec_params=ex, pg_required=1,
+                          entry_price_override=Decimal("100.2"))
+    assert plain.entry_price != fixed.entry_price
+    assert fixed.entry_price == Decimal("100.2")
+
+
+def test_inverted_archive_tp_ignored():
+    # XMR-кейс: архивный TP ниже входа для LONG — не цель, а мусор: игнор,
+    # иначе вышел бы TAKE в убыток.
+    from level_tester.backtester.hourbounce import ExecParams
+    cs = mk(
+        px=[Decimal("100.5"), Decimal("101.5"), Decimal("102.0")],
+        opens=[Decimal("100.2"), Decimal("100.5"), Decimal("101.5")],
+        lows=[Decimal("99.9"), Decimal("100.4"), Decimal("101.4")],
+        highs=[Decimal("100.6"), Decimal("101.6"), Decimal("102.1")],
+    )
+    ex = ExecParams(sl_pct=Decimal("1"), fixed_tp=Decimal("99.0"),
+                    be_trigger_pct=None, be_lock_pct=None,
+                    trail_activation_pct=None, trail_distance_pct=None)
+    r = review_signal(side="LONG", level_price=Decimal("100"), signal_time=BASE,
+                      candles=cs, entry_code="T1", sl_index=1, config=cfg(life_window_t=10),
+                      exec_params=ex)
+    assert r.exit_kind != "tp"
 
 
 def test_cell_pnl_signed_and_zero():

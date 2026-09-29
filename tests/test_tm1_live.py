@@ -67,6 +67,48 @@ def test_compute_cell_matches_direct_engine() -> None:
     assert direct.outcome == cell["outcome"]
 
 
+def test_tm1_with_pg_params_matches_pg_holding() -> None:
+    """Паритет удержания: TM1 со снапшотом PGv2 даёт тот же выход, что PG-эталон.
+
+    Вход притянут друг к другу фикстурой (m2 открывается ровно по уровню):
+    T1M входит по level в касание m1, PG req=0 — по open m2. Дальше оба ведут
+    SL 1% / TP 5% / БУ 0.8→0.35 / BE-fix 50% / трейлинг 1.6/0.6/0.1 одинаково:
+    частичка 50% по 100.8, остаток в БУ 100.35, разворот закрывает остаток —
+    взвешенный выход 100.575 (+0.575% гросс).
+    """
+    from level_tester.backtester.hourbounce import ExecParams
+
+    m1 = _mk([
+        (100.5, 100.6, 100.4, 100.5),
+        (100.4, 100.6, 99.9, 100.5),  # касание, зелёное закрытие над уровнем
+        (100.0, 101.0, 100.0, 100.9),  # open == level: входы T1M и PG совпадают
+        (100.9, 100.95, 100.3, 100.4),  # разворот через БУ-лок
+        (100.4, 100.5, 100.0, 100.2),
+    ])
+    cfg = config_for_tf("1m")
+    pg_ex = ExecParams(
+        sl_price=Decimal("99.0"), fixed_tp=Decimal("105.0"),
+        be_trigger_pct=Decimal("0.8"), be_lock_pct=Decimal("0.35"),
+        partial_trigger_pct=Decimal("0.8"), partial_close_pct=Decimal("50.0"),
+        trail_activation_pct=Decimal("1.6"), trail_distance_pct=Decimal("0.6"),
+        trail_threshold_pct=Decimal("0.1"), sl_source="archive",
+    )
+    pg = review_signal(side="LONG", level_price=Decimal(100), signal_time=BASE,
+                       candles=m1, entry_code="PG", sl_index=0, config=cfg,
+                       exec_params=pg_ex, pg_required=0, tf="1m")
+    tm1_params = {"sl_pct": 1.0, "tp_pct": 5.0, "trail_activation_pct": 1.6,
+                  "trail_distance_pct": 0.6, "be_trigger_pct": 0.8,
+                  "be_lock_pct": 0.35, "partial_trigger_pct": 0.8,
+                  "partial_close_pct": 50.0}
+    cell = _tm1_compute_cell("LONG", Decimal(100), BASE, m1, tm1_params, cfg)
+    assert pg.entry_price == Decimal(str(cell["entry_price"])) == Decimal("100")
+    assert pg.outcome == cell["outcome"] == "STOP"
+    assert cell["exit_kind"] == "sl"
+    assert Decimal(str(cell["exit_price"])) == Decimal("100.575")
+    assert pg.exit_price == Decimal("100.575")
+    assert cell["has_partial"] is True and cell["has_be"] is True
+
+
 def test_zero_level_never_crashes() -> None:
     """Битый уровень (entry_price=0.0 из архива): все входы — NO_ENTRY/bad_level."""
     from level_tester.backtester.hourbounce import review_matrix, review_signal

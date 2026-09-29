@@ -1,0 +1,4 @@
+rank,total,winrate,pf,max_dd,expectancy,wins,decided,n_partial,n_be,sl_pct,tp_pct,trail_activation_pct,trail_distance_pct,be_trigger_pct,be_lock_pct,partial_trigger_pct,partial_close_pct
+1,38.34,100.0,inf,0.0,0.935,41,41,4,41,1.0,5.0,1.6,0.6,0.2,1.0,1.4,90.0
+2,38.34,100.0,inf,0.0,0.935,41,41,4,41,1.0,,,,0.2,1.0,1.4,90.0
+3,36.9,100.0,inf,0.0,0.9,41,41,0,41,1.0,5.0,,,0.2,1.0,,

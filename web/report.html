@@ -157,6 +157,7 @@ $('btn-run').onclick = async () => {
     if ($('f-to').value) q.set('date_to', $('f-to').value);
     if ($('f-traded').checked) q.set('traded_only', 'true');  // серверный фильтр ДО лимита
     const s = await api('/api/hourbounce/signals?' + q.toString());
+    if (s.truncated) $('status').textContent = `Внимание: архив обрезан предсрезом 5000 по created_at — дальние периоды могут быть неполными.`;
     let items = s.items || [];
     if (stopTake) items = items.filter((x) => ['STOP', 'TAKE'].includes(String(x.outcome_arch || '').toUpperCase()));
     const id2arch = {};
@@ -192,7 +193,7 @@ $('btn-run').onclick = async () => {
     const nTr = data.rows.filter((r) => r.traded).length;
     const nErr = data.rows.filter((r) => r.error).length;
     const beTxt = data.with_be && data.be_params ? ` · Grid+БУ ${data.be_params.trigger_pct}/${data.be_params.lock_pct}` : '';
-    $('status').textContent = `Готово [${(data.tf || tf).toUpperCase()}${beTxt}]: ${data.count} сигналов (из них отторговано в БД: ${nTr})${nErr ? ` · ОШИБОК: ${nErr} (наведите на красный бейдж в строке)` : ''}. Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
+    $('status').textContent = `Готово [${(data.tf || tf).toUpperCase()}${beTxt}]: ${data.count} сигналов · период по выставлению ${$('f-from').value || '…'}…${$('f-to').value || '…'} (из них отторговано в БД: ${nTr})${nErr ? ` · ОШИБОК: ${nErr} (наведите на красный бейдж в строке)` : ''}. Зелёный — плюс, красный — минус, ● — есть реальная сделка в архиве.`;
   } catch (e) {
     $('status').textContent = 'Ошибка: ' + e.message;
   } finally {
@@ -263,6 +264,29 @@ function winrateRow(label, stats, cols, ncols) {
   return h + '</tr>';
 }
 
+function fmtEVcell(st) {
+  // Матожидание на решённых: EV = wr*avg_win + (1-wr)*avg_loss, флэт исключён.
+  if (!st || !st.d) return { txt: '—', cls: 'zero' };
+  const aw = st.w ? (st.sw || 0) / st.w : 0;
+  const nl = st.d - st.w;
+  const al = nl ? (st.sl || 0) / nl : 0;
+  const ev = (st.w / st.d) * aw + (nl / st.d) * al;
+  return { txt: `${ev > 0 ? '+' : ''}${ev.toFixed(2)}`, cls: ev > 0 ? 'pos' : ev < 0 ? 'neg' : 'zero' };
+}
+
+function evRow(label, stats, cols, ncols) {
+  let h = `<tr class="grp" style="font-weight:400;"><td style="padding-left:18px;" title="Матожидание = wr*avg_win+(1-wr)*avg_loss на решённых (без флэта)">${label}</td><td></td>`;
+  for (const c of cols) {
+    const f = fmtEVcell(stats[c]);
+    h += `<td class="${f.cls}">${f.txt}</td>`;
+  }
+  const t = fmtEVcell(stats.TOTAL);
+  h += `<td class="${t.cls}">${t.txt}</td>`;
+  const n = ncols - cols.length - 3;
+  for (let i = 0; i < n; i++) h += '<td></td>';
+  return h + '</tr>';
+}
+
 function renderTable(data, groupMode) {
   const t = $('tbl');
   const cols = data.columns;
@@ -284,8 +308,8 @@ function renderTable(data, groupMode) {
       cols.forEach((c) => { sums[c] = 0; });
       sums.TOTAL = 0;
       const stats = {};
-      cols.forEach((c) => { stats[c] = { w: 0, d: 0 }; });
-      stats.TOTAL = { w: 0, d: 0 };
+      cols.forEach((c) => { stats[c] = { w: 0, d: 0, sw: 0, sl: 0 }; });
+      stats.TOTAL = { w: 0, d: 0, sw: 0, sl: 0 };
       // Суммируем отображаемые значения (копейки, 2 знака) — иначе итог
       // не сойдётся с суммой клеток, которые показаны через toFixed(2).
       let totBest = 0;
@@ -295,8 +319,9 @@ function renderTable(data, groupMode) {
           const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
           const d = Math.round(v * 100) / 100;
           sums[c] = Math.round((sums[c] + d) * 100) / 100;
-          if (v > 0) stats[c].w += 1;
+          if (v > 0) { stats[c].w += 1; stats[c].sw += v; }
           if (v !== 0) stats[c].d += 1;
+          if (v < 0) stats[c].sl += v;
           if (v > b) b = v;
           if (v) hit = true;
         });
@@ -304,7 +329,8 @@ function renderTable(data, groupMode) {
         totBest = Math.round((totBest + bd) * 100) / 100;
         if (hit) {
           stats.TOTAL.d += 1;
-          if (b > 0) stats.TOTAL.w += 1;
+          if (b > 0) { stats.TOTAL.w += 1; stats.TOTAL.sw += b; }
+          else if (b < 0) stats.TOTAL.sl += b;
         }
       });
       // TOTAL стоит под колонкой "Лучший" -> сумма лучших вниз по столбцу
@@ -313,6 +339,7 @@ function renderTable(data, groupMode) {
       const nTr = groups[k].filter((r) => r.traded).length;
       h += subtotalRow(`▸ ${k} — ${n} сигн.${nTr ? `, traded: ${nTr}` : ''} · Σ PnL`, sums, cols, ncols);
       h += winrateRow(`↳ ${k} — winrate по вариантам (win = PnL&gt;0, флэт исключён)`, stats, cols, ncols);
+      h += evRow(`↳ ${k} — EV (матожидание на решённых)`, stats, cols, ncols);
     }
     for (const r of data.rows.filter((x) => gkey(x) === k)) {
       const archTxt = r.traded
@@ -353,20 +380,22 @@ function renderTable(data, groupMode) {
   // Вторая строка подвала: винрейт по каждому варианту за весь отчёт
   // (без группировки — статистика по типу входа). Пересчёт из клеток, не из футера.
   const fstats = {};
-  cols.forEach((c) => { fstats[c] = { w: 0, d: 0 }; });
-  fstats.TOTAL = { w: 0, d: 0 };
+  cols.forEach((c) => { fstats[c] = { w: 0, d: 0, sw: 0, sl: 0 }; });
+  fstats.TOTAL = { w: 0, d: 0, sw: 0, sl: 0 };
   (data.rows || []).forEach((r) => {
     let b = -Infinity, hit = false;
     cols.forEach((c) => {
       const v = Number(((r.cells || {})[c] || {}).pnl) || 0;
-      if (v > 0) fstats[c].w += 1;
+      if (v > 0) { fstats[c].w += 1; fstats[c].sw += v; }
       if (v !== 0) fstats[c].d += 1;
+      if (v < 0) fstats[c].sl += v;
       if (v > b) b = v;
       if (v) hit = true;
     });
     if (hit) {
       fstats.TOTAL.d += 1;
-      if (b > 0) fstats.TOTAL.w += 1;
+      if (b > 0) { fstats.TOTAL.w += 1; fstats.TOTAL.sw += b; }
+      else if (b < 0) fstats.TOTAL.sl += b;
     }
   });
   h += `<tr><td>WR столбец (winrate)</td><td></td>`;
@@ -375,7 +404,14 @@ function renderTable(data, groupMode) {
     h += `<td class="${f.cls}">${f.txt}</td>`;
   }
   const ft = fmtWR(fstats.TOTAL.w, fstats.TOTAL.d);
-  h += `<td class="${ft.cls}">${ft.txt}</td></tr></tfoot>`;
+  h += `<td class="${ft.cls}">${ft.txt}</td></tr>`;
+  h += `<tr><td title="Матожидание = wr*avg_win+(1-wr)*avg_loss на решённых (без флэта)">EV столбец (матожидание)</td><td></td>`;
+  for (const c of cols) {
+    const f = fmtEVcell(fstats[c]);
+    h += `<td class="${f.cls}">${f.txt}</td>`;
+  }
+  const fte = fmtEVcell(fstats.TOTAL);
+  h += `<td class="${fte.cls}">${fte.txt}</td></tr></tfoot>`;
   t.innerHTML = h;
   $('wrap').style.display = '';
 }

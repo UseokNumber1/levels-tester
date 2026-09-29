@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.4.1 (2026-09-29)
+
+### Fixed
+- **Внутрисвечная политика v5** (`src/level_tester/backtester/hourbounce.py`, `ENGINE_VERSION` 3 → 6): стоп всегда предпочтительнее TP/БУ в той же свече; релокация БУ вступает в силу со следующей свечи; лок вне рынка (за триггером) — выход по цене триггера; стоп в зоне прибыли срабатывает только на пуллбэке; гэп через стоп — сразу по open.
+- **Эталон PG 1:1** (`src/level_tester/backtester/hourbounce.py`, `src/level_tester/api/app.py`): вход реплея — строго по архивной цене (`entry_price_override`), иначе абсолютные SL/TP архива висят на чужой базе; перевёрнутый архивный TP игнорируется; несвежий SL при лживых флагах (`sl_filled` с выходом вдали от записанного SL, кейс INJUSDT) — config-фолбэк.
+- **Режим `mode=signal`** (`src/level_tester/api/app.py`): `_hb_build_single` не передавал обязательный `signal_time` — эндпоинт `/api/hourbounce/review?mode=signal` падал.
+
+### Added
+- **PG-эталон в отчётах** (`src/level_tester/api/app.py`, `web/report_tm1.html`): колонка `pg_pnl/pg_outcome/pg_exit_kind` в строках TM1 (`_tm1_pg_ref`) и эталонная ячейка PG в PnL-отчёте (`_hb_pg_cell`); `_hb_archive_meta` отдаёт `close_reason`/`exit_price` для детектора несвежего SL.
+- **Матожидание в PnL-отчёте** (`web/report.html`): EV-строки `EV = wr*avg_win + (1-wr)*avg_loss` на решённых сделках.
+
+### Changed
+- **Разделение place/scan-anchor** (`src/level_tester/api/app.py`): `_hb_dt_place` возвращает строго время выставления; якорь сканирования `max(place, watch_start)` вынесен в `_hb_scan_anchor`.
+- **Единая сборка строк TM1** (`src/level_tester/api/app.py`): `_tm1_row` для recalc и фонового job.
+- **Ядро исполнения** (`src/level_tester/backtester/hourbounce.py`): уровни позиции — `PositionLevels`/`_position_levels`; предикаты `_touched`/`_gapped`/`_stop_hit`/`_tp_hit`/`_lock_beyond_market` вместо размазанной логики в цикле.
+- **validate_vs_archive** (`scripts/validate_vs_archive.py`): сравнение net-PnL (гросс минус maker/taker) вместо гросса; TF-aware окно lookforward; `closed_manual` исключён из модели.
+
+### Tests
+- 7 новых тестов в `tests/test_hourbounce.py` (v5: стоп бьёт БУ, лок вне рынка, пуллбэк/продолжение; PG: entry override, перевёрнутый TP, несвежий SL) и паритет удержания TM1/PG в `tests/test_tm1_live.py`.
+
 ## v1.4.0 (2026-09-25)
 
 ### Added

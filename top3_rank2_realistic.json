@@ -1,0 +1,11 @@
+{
+  "session_id": "tm1s_1",
+  "sl_pct": 1.0,
+  "tp_pct": null,
+  "trail_activation_pct": 1.6,
+  "trail_distance_pct": 0.6,
+  "be_trigger_pct": 0.8,
+  "be_lock_pct": 0.35,
+  "partial_trigger_pct": 0.8,
+  "partial_close_pct": 50.0
+}

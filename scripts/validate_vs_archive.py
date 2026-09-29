@@ -1,5 +1,5 @@
 """Сверка тестера с фактом: закрытые сделки архива PGv2 прогоняются нашим
-движком 1:1 (параметры SL/TP/BE/trailing из сигнала) и сравниваются с
+движком 1:1 (параметры SL/TP/BE/trailing/BE-fix из сигнала) и сравниваются с
 реальными исходом и PnL%.
 
 Использование (из корня проекта, venv активен):
@@ -7,12 +7,16 @@
 
 Что сравнивается:
 - исход: closed_tp*/trailing_tp -> TAKE, closed_sl* -> STOP, closed_be -> BE-выход;
-- PnL%: архивный pnl_percent против знакового (exit-entry)/entry*100 реплея.
+- PnL%: архивный pnl_percent против net-PnL% реплея (гросс минус maker/taker).
 
 Заведомые расхождения (не баги, фиксируем как допуски):
 - вход: наш T1M/T1L/T2/T3 (маркет-M1/лимит-M1/open) против реального маркет/лимит-филла PGv2;
-- комиссии и парциал breakeven_fix 50% не моделируем (наш PnL — гросс);
-- closed_be_filled: PGv2 мог фиксить часть позиции (be_fix), у нас — полный выход.
+- closed_manual: закрыто оператором руками — модель гнаться за ним не должна;
+- архивный pnl_percent считается от номинала с учётом плеча/доливок,
+  наш net-PnL% — ценовой % движения; сходится направление и порядок величины,
+  а не копейка в копейку;
+- внутриминутный порядок тиков на M1 неразличим (стоп против тейка
+  в одной свече — консервативно считаем стоп, помечаем ambiguous).
 """
 from __future__ import annotations
 
@@ -101,7 +105,7 @@ def main() -> int:
             print(f"{a['symbol']:12} нет SL в архиве — пропуск")
             skipped += 1
             continue
-        from level_tester.api.app import _hb_dt_place  # noqa: E402
+        from level_tester.api.app import _hb_dt_place, _hb_scan_anchor  # noqa: E402
 
         try:
             import json as _json
@@ -109,16 +113,20 @@ def main() -> int:
             _meta = _json.loads(a.get("metadata") or "{}")
         except Exception:
             _meta = {}
-        _, sig_time = _hb_dt_place(sid, None, sig.timestamp, _meta.get("confirmation_waiting_started_at"))
+        _, place_dt = _hb_dt_place(sid, None, sig.timestamp)
+        sig_time = _hb_scan_anchor(place_dt, _meta.get("confirmation_waiting_started_at"))
         if sig_time is None:
             skipped += 1
             continue
         tf = (sig.confirmation_timeframe or "5m").lower()
         if tf not in ("1m", "3m", "5m", "15m"):
             tf = "5m"
+        # Окно — по времени ТФ сигнала (база M5: 5 мин на бар), иначе для 1m/15m
+        # окно было бы в 5 раз короче/длиннее реального.
+        _tf_step = {"1m": 1, "3m": 3, "5m": 5, "15m": 15}[tf]
         start = sig_time
         end = min(
-            sig_time + args.lookforward * __import__("datetime").timedelta(minutes=5),
+            sig_time + args.lookforward * __import__("datetime").timedelta(minutes=_tf_step),
             datetime.now(UTC),
         )
         try:
@@ -151,8 +159,8 @@ def main() -> int:
                               m1_candles=m1)
             outs[code] = r.outcome
         if pg.entry_price and pg.exit_price and pg.outcome in ("TAKE", "STOP"):
-            e, x = float(pg.entry_price), float(pg.exit_price)
-            o_pnl = round((x - e) / e * 100 if sig.side == "LONG" else (e - x) / e * 100, 4)
+            # Net-PnL движка (гросс минус maker/taker) — сопоставимо с архивным pnl_percent.
+            o_pnl = round(float(pg.net_pnl_pct), 4) if pg.net_pnl_pct is not None else None
         else:
             o_pnl = None
         a_out = arch_outcome(a["status"], a.get("close_reason"))
